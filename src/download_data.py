@@ -2,7 +2,6 @@ import csv
 from datetime import date
 from pathlib import Path
 
-import pandas as pd
 from datasets import load_dataset
 
 RAW_DIR = Path('data/raw')
@@ -46,17 +45,6 @@ def download_all(sources, output_dir):
             if record is not None]
 
 
-# Define function to separate the safe and unsafe halves of XSTest
-def split_xstest(raw_dir):
-    df = pd.read_csv(raw_dir / 'xstest.csv')
-    safe = df[df['label'] == 'safe']
-    unsafe = df[df['label'] == 'unsafe']
-    safe.to_csv(raw_dir / 'xstest_safe.csv', index=False)
-    unsafe.to_csv(raw_dir / 'xstest_unsafe.csv', index=False)
-    print(f'xstest: {len(safe)} safe and {len(unsafe)} unsafe prompts separated')
-    return safe, unsafe
-
-
 # Define function to append download records to the provenance file
 def write_provenance(records, provenance_path):
     if not records:
@@ -72,5 +60,4 @@ def write_provenance(records, provenance_path):
 
 if __name__ == '__main__':
     download_records = download_all(sources=SOURCES, output_dir=RAW_DIR)
-    xstest_safe, xstest_unsafe = split_xstest(raw_dir=RAW_DIR)
     write_provenance(records=download_records, provenance_path=PROVENANCE_PATH)
