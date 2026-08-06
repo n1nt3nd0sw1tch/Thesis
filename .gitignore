@@ -1,75 +1,57 @@
-# Environment files
+# Keys
 .env
-.env*
+.env.*
 *.key
 *.token
 .hf_token
 secrets/
 
-# Cache
-__pycache__/
+# Python
+**pycache**/
 *.py[cod]
-*$py.class
-.cache/
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
 
-# Jupyter notebook checkpoints
+# Jupyter
 .ipynb_checkpoints/
 
 # Virtual environments
+.venv/
 venv/
 ENV/
-.venv/
 .conda/
 
-# MacOS
+# System and editors
 .DS_Store
-*.DS_Store
-
-# Editor
 .vscode/
 .idea/
 
-# Downloaded source datasets, regenerable via src/download_data.py
-data/raw/
-data/candidates/
-data/candidates.csv
-data/coverage.csv
+# Downloaded datasets
+data/original/
 
-# Hand-authored artefacts are the contribution and must be tracked
-!data/provenance.csv
-!data/scenarios.csv
-!data/cue_bank.csv
-!data/variants.csv
-!data/expected.csv
-
-# Model outputs, withheld from release under the ethics protocol
+# Model outputs
 results/responses/
 results/raw/
 results/**/*.jsonl
 results/**/*_responses.csv
 results/**/*_traces.csv
 
-# Aggregated results and figures are safe to track
-!results/tables/
-!results/figures/
-
-# HPC job artefacts
+# Jobs and logs
 jobs/*.o[0-9]*
 jobs/*.e[0-9]*
 jobs/*.po[0-9]*
 jobs/*.pe[0-9]*
 *.log
 
-# Model weights and lexical resources
+# Models
 models/
 *.safetensors
 *.gguf
 *.bin
 *.pt
 
-# LaTeX build artefacts
+# LaTeX
 *.aux
 *.bbl
 *.blg

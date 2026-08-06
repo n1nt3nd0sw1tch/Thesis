@@ -1,0 +1,62 @@
+# Where the source data comes from. Locations, splits, formats and licences
+# only; how each dataset is filtered and mapped to a domain lives in
+# scripts/prepare_data.py, because that is a methodological decision.
+#
+# kind: hub    downloaded from the Hugging Face Hub, origin is the repository
+# kind: file   downloaded from a url, filename is resolved against the pinned
+#              commit of the Safe-Child-LLM repository
+#
+# Every dataset is required. A missing one stops the pipeline rather than
+# quietly narrowing the source set.
+
+# Safe-Child-LLM is also archived on Harvard Dataverse under
+# doi:10.7910/DVN/MRZGNB, which the fallback urls point at. The commit is
+# pinned so a later change to the repository cannot alter the downloaded
+# files. Re-pin only if the corpus itself is revised.
+safechild_commit: f69a651ff5c992c6d423b6a129ade8bf674fb63b
+
+datasets:
+  xstest:
+    kind: hub
+    origin: Paul/XSTest
+    split: train
+    licence: CC BY 4.0
+
+  donotanswer:
+    kind: hub
+    origin: LibrAI/do-not-answer
+    split: train
+    licence: Apache 2.0
+
+  minorbench:
+    kind: hub
+    origin: govtech/MinorBench
+    split: test
+    licence: MIT
+
+  orbench:
+    kind: hub
+    origin: bench-llm/or-bench
+    config: or-bench-hard-1k
+    split: train
+    licence: CC BY 4.0
+
+  simplesafetytests:
+    kind: hub
+    origin: Bertievidgen/SimpleSafetyTests
+    split: test
+    licence: CC BY-NC 4.0
+
+  safechildllm_6_12:
+    kind: file
+    filename: 6_12_ChildSafeLLM.xlsx
+    fallback: https://dataverse.harvard.edu/api/access/datafile/11613330
+    format: excel
+    licence: CC0 1.0
+
+  safechildllm_13_17:
+    kind: file
+    filename: 13_17_ChildSafeLLM.xlsx
+    fallback: https://dataverse.harvard.edu/api/access/datafile/11613329
+    format: excel
+    licence: CC0 1.0
