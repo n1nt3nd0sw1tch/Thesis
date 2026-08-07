@@ -1,18 +1,8 @@
-# Where the source data comes from. Locations, splits, formats and licences
-# only; how each dataset is filtered and mapped to a domain lives in
-# scripts/prepare_data.py, because that is a methodological decision.
-#
-# kind: hub    downloaded from the Hugging Face Hub, origin is the repository
-# kind: file   downloaded from a url, filename is resolved against the pinned
-#              commit of the Safe-Child-LLM repository
-#
-# Every dataset is required. A missing one stops the pipeline rather than
-# quietly narrowing the source set.
+# Source datasets used to construct the benchmark.
+# Filtering and domain mapping are defined in scripts/prepare_data.py.
 
-# Safe-Child-LLM is also archived on Harvard Dataverse under
-# doi:10.7910/DVN/MRZGNB, which the fallback urls point at. The commit is
-# pinned so a later change to the repository cannot alter the downloaded
-# files. Re-pin only if the corpus itself is revised.
+# Safe-Child-LLM repository version.
+# Archived at Harvard Dataverse: doi:10.7910/DVN/MRZGNB.
 safechild_commit: f69a651ff5c992c6d423b6a129ade8bf674fb63b
 
 datasets:

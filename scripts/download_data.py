@@ -9,20 +9,15 @@ from datetime import date
 import pandas as pd
 import requests
 from datasets import load_dataset
-
 from settings import (DATASETS, DATASETS_DOC_PATH, ORIGINAL_DIR,
-                      SAFECHILD_COMMIT, preview)
+                      SAFECHILD_COMMIT)
 
-# =============================================================================
+# ----------------------------------------------------------------------------
 # Settings
-# =============================================================================
+# ----------------------------------------------------------------------------
 
 TIMEOUT = 60
 USER_AGENT = 'thesis-data-collection'
-
-# The documentation table carries the origin as well; the preview leaves it out
-# because the pinned asset urls are far too long for a terminal.
-SUMMARY_COLUMNS = ['dataset', 'rows', 'licence', 'sha256']
 
 # File-based datasets store only a filename, resolved here against the pinned
 # commit so that no url is written out twice.
@@ -30,10 +25,9 @@ SAFECHILD_REPOSITORY = ('https://raw.githubusercontent.com/'
                         'The-Responsible-AI-Initiative/Safe_Child_LLM_Evaluation')
 SAFECHILD_ASSETS = f'{SAFECHILD_REPOSITORY}/{SAFECHILD_COMMIT}/assets'
 
-# =============================================================================
+# ----------------------------------------------------------------------------
 # Functions
-# =============================================================================
-
+# ----------------------------------------------------------------------------
 
 # Define function to fill in the full url of every file-based dataset
 def resolve_origins(datasets, assets_url):
@@ -76,7 +70,7 @@ def fetch_from_file(spec):
             return (pd.read_excel(payload) if spec.get('format') == 'excel'
                     else pd.read_csv(payload))
         except Exception as error:
-            print(f'  {url.split("/")[2]} failed, {type(error).__name__}: {error}')
+            print(f'Failed {url.split("/")[2]}, {type(error).__name__}: {error}')
     raise ConnectionError('no source reachable')
 
 
@@ -84,15 +78,15 @@ def fetch_from_file(spec):
 def download(name, spec, original_dir):
     path = original_dir / f'{name}.csv'
     if path.exists():
-        print(f'{name}: already present')
+        print(f'Skipped {name}, already present')
         return True
     try:
         frame = fetch_from_hub(spec) if spec['kind'] == 'hub' else fetch_from_file(spec)
     except Exception as error:
-        print(f'{name}: failed, {type(error).__name__}: {error}')
+        print(f'Failed {name}, {type(error).__name__}: {error}')
         return False
     write_once(frame=frame, path=path)
-    print(f'{name}: {len(frame)} rows written')
+    print(f'Downloaded {name}, {len(frame)} rows')
     return True
 
 
@@ -104,7 +98,6 @@ def download_all(datasets, original_dir):
     if missing:
         raise SystemExit(f'{len(missing)} datasets could not be downloaded: '
                          f'{", ".join(missing)}')
-    print(f'\n{len(datasets)} datasets present')
 
 
 # Define function to record what each downloaded file holds
@@ -116,7 +109,10 @@ def summarise_downloads(datasets, original_dir):
                      'licence': spec['licence'],
                      'rows': len(pd.read_csv(path)) if path.exists() else 0,
                      'sha256': file_hash(path)[:16] if path.exists() else ''})
-    return pd.DataFrame(rows)
+    downloads = pd.DataFrame(rows)
+    print(f'Datasets: {len(downloads)} files, '
+          f'{int(downloads["rows"].sum())} source records')
+    return downloads
 
 
 # Define function to write the summary out as the documentation table
@@ -134,17 +130,16 @@ def write_documentation(summary, doc_path):
                      f'{count} | {digest} |')
     lines += ['', f'pandas {pd.__version__}']
     doc_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-    print(f'documentation written to {doc_path.name}')
+    print(f'Documentation written to {doc_path.name}')
 
 
-# =============================================================================
+# ----------------------------------------------------------------------------
 # Run
-# =============================================================================
+# ----------------------------------------------------------------------------
 
 if __name__ == '__main__':
-    sources = resolve_origins(datasets=DATASETS, assets_url=SAFECHILD_ASSETS)
-    download_all(datasets=sources, original_dir=ORIGINAL_DIR)
+    resolved = resolve_origins(datasets=DATASETS, assets_url=SAFECHILD_ASSETS)
+    download_all(datasets=resolved, original_dir=ORIGINAL_DIR)
 
-    downloads = summarise_downloads(datasets=sources, original_dir=ORIGINAL_DIR)
+    downloads = summarise_downloads(datasets=resolved, original_dir=ORIGINAL_DIR)
     write_documentation(summary=downloads, doc_path=DATASETS_DOC_PATH)
-    preview(downloads[SUMMARY_COLUMNS], 'Datasets', rows=len(downloads))
