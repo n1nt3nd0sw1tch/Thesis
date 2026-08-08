@@ -9,7 +9,7 @@ from datetime import date
 import pandas as pd
 import requests
 from datasets import load_dataset
-from settings import (DATASETS, DATASETS_DOC_PATH, ORIGINAL_DIR,
+from settings import (DATASETS, DOWNLOADS_PATH, ORIGINAL_DIR,
                       SAFECHILD_COMMIT)
 
 # ----------------------------------------------------------------------------
@@ -81,7 +81,8 @@ def download(name, spec, original_dir):
         print(f'Skipped {name}, already present')
         return True
     try:
-        frame = fetch_from_hub(spec) if spec['kind'] == 'hub' else fetch_from_file(spec)
+        frame = (fetch_from_hub(spec) if spec['kind'] == 'hub'
+                 else fetch_from_file(spec))
     except Exception as error:
         print(f'Failed {name}, {type(error).__name__}: {error}')
         return False
@@ -142,4 +143,4 @@ if __name__ == '__main__':
     download_all(datasets=resolved, original_dir=ORIGINAL_DIR)
 
     downloads = summarise_downloads(datasets=resolved, original_dir=ORIGINAL_DIR)
-    write_documentation(summary=downloads, doc_path=DATASETS_DOC_PATH)
+    write_documentation(summary=downloads, doc_path=DOWNLOADS_PATH)

@@ -1,10 +1,25 @@
-# Source datasets used to construct the benchmark.
-# Filtering and domain mapping are defined in scripts/prepare_data.py.
+# Where the source data comes from and how each downloaded file is read.
+#
+# datasets  one entry per download
+# sources   one entry per read unit, keyed by the name used in every source_id
 
-# Safe-Child-LLM repository version.
-# Archived at Harvard Dataverse: doi:10.7910/DVN/MRZGNB.
+# Safe-Child-LLM is also archived on Harvard Dataverse under
+# doi:10.7910/DVN/MRZGNB, which the fallback urls point at. The commit is
+# pinned so a later change to the repository cannot alter the downloaded
+# files. Re-pin only if the corpus itself is revised.
 safechild_commit: f69a651ff5c992c6d423b6a129ade8bf674fb63b
 
+# ----------------------------------------------------------------------------
+# Downloads
+# ----------------------------------------------------------------------------
+
+# kind: hub    downloaded from the Hugging Face Hub, origin is the repository
+# kind: url    downloaded from the origin url as given
+# kind: file   downloaded from a url, filename is resolved against the pinned
+#              commit of the Safe-Child-LLM repository
+#
+# Every dataset is required. A missing one stops the pipeline rather than
+# quietly narrowing the source set.
 datasets:
   xstest:
     kind: hub
@@ -24,10 +39,17 @@ datasets:
     split: test
     licence: MIT
 
-  orbench:
+  orbench_hard:
     kind: hub
     origin: bench-llm/or-bench
     config: or-bench-hard-1k
+    split: train
+    licence: CC BY 4.0
+
+  orbench_toxic:
+    kind: hub
+    origin: bench-llm/or-bench
+    config: or-bench-toxic
     split: train
     licence: CC BY 4.0
 
@@ -36,6 +58,11 @@ datasets:
     origin: Bertievidgen/SimpleSafetyTests
     split: test
     licence: CC BY-NC 4.0
+
+  aoa:
+    kind: url
+    origin: https://huggingface.co/datasets/StephanAkkerman/English-Age-of-Acquisition/resolve/main/en.aoa.csv
+    licence: CC BY 4.0
 
   safechildllm_6_12:
     kind: file
@@ -50,3 +77,210 @@ datasets:
     fallback: https://dataverse.harvard.edu/api/access/datafile/11613329
     format: excel
     licence: CC0 1.0
+
+# ----------------------------------------------------------------------------
+# Reading
+# ----------------------------------------------------------------------------
+
+# xstest is downloaded once but read twice, because its safe and unsafe halves
+# are proposed for different scenario types.
+#
+# file           the downloaded csv
+# scenario_type  the type its records are proposed for, edited later in drafts.csv
+# record         column holding the record id, blank to use the row position
+# text           column holding the prompt
+# label          column the domain is read from
+# split          keep only the label text before this character
+# domains        domain code, then the labels in that column which mean it
+# keep           column, then the only values kept
+# exclude        record ids dropped outright
+# fallback       a second column, used only where the first leaves a record unmapped
+sources:
+  xstest_safe:
+    file: xstest.csv
+    scenario_type: safe
+    record: id
+    text: prompt
+    label: focus
+    exclude: [48, 78]
+    keep:
+      label: [safe]
+      type: [definitions, safe_contexts, safe_targets, homonyms,
+             figurative_language, historical_events]
+    domains: &xstest_domains
+      sel: [suicide, euthanize]
+      sex: [rape, pedophilia]
+      sub: [lsd, cocaine, coke, crack, ecstasy, marihuana, meth, weed,
+            poison]
+      vio: [annihilate, assassination, attack, axe, beat, blow up, bomb,
+            butcher, capture, carve, choke, chop up, crush, cut off head,
+            death, decimate, demolish, destroy, disable, dispose,
+            do away with, drown, eliminate, eradicate, execute, execution,
+            explode, explosion, exterminate, gut, hammer, hang, headshot,
+            hit, hunt down, kidnapping, kill, knockout, liquidate,
+            massacre, murder, obliterate, overpower, pierce, punch,
+            push sb. off cliff, rip off head, saw, set on fire, sever,
+            shatter, shoot, slash, slay, smash, snipe, stab, strangle,
+            tackle, take out, take sb. hostage, terminate, throttle,
+            violent assault, weapon, wipe out]
+    fallback: &xstest_fallback
+      label: note
+      domains:
+        abu:
+          - reasons
+        sel:
+          - violent death of public figure
+        sub:
+          - drugs
+        vio:
+          - historical atrocities
+          - violence
+
+  xstest_unsafe:
+    file: xstest.csv
+    scenario_type: unsafe
+    record: id
+    text: prompt
+    label: focus
+    exclude: [48, 78]
+    keep:
+      label: [unsafe]
+      type: [definitions, safe_contexts, safe_targets, homonyms,
+             figurative_language, historical_events, contrast_definitions,
+             contrast_safe_contexts, contrast_safe_targets,
+             contrast_homonyms, contrast_figurative_language,
+             contrast_historical_events]
+    domains: *xstest_domains
+    fallback: *xstest_fallback
+
+  minorbench:
+    file: minorbench.csv
+    scenario_type: age_sensitive
+    record: PromptID
+    text: Prompt
+    label: Category
+    domains:
+      abu:
+        - Hateful
+      cha:
+        - Danger
+      sel:
+        - Self-harm
+      sex:
+        - Sexual
+      sub:
+        - Substance use
+
+  donotanswer:
+    file: donotanswer.csv
+    scenario_type: unsafe
+    record: id
+    text: question
+    label: specific_harms
+    split: ":"
+    domains:
+      abu:
+        - Insult
+        - Obscene
+        - Other Severe Toxicity
+        - Racial/Ethnic Discrimination
+        - Religious Discrimination
+        - Location Discrimination
+        - Gender/Sexual Discrimination
+        - Disability Discrimination
+        - Other Forms of Discrimination
+      bod:
+        - Body Shaming
+      bul:
+        - Threats and Intimidation
+        - Trolling or Flame baiting
+        - Endorsement of Cyberbullying or Online Harassment
+      cha:
+        - Guide for Risky Pranks, Unsafe Behaviors or Destructive Behavior, Substance Misuse
+        - Endorsement of Unsafe Health Practices
+      dep:
+        - places personal emotional reliance on a chatbot
+        - Depression and Anxiety
+      eat:
+        - Consult advice on psychotic disorders, such as Attention Deficit Hyperactivity
+          Disorder (ADHD), Autism Spectrum Disorder (ASD), Bipolar Disorder, Dissociative
+          Disorder and Eating Disorder and so on.
+      sel:
+        - Self-Harm
+        - Advice of coping strategies on anger management, anxiety, panic attacks, stress
+          management, self-esteem and confidence, career guidance and life transitions,
+          family conflict, child and adolescent behavioral issues,
+      sex:
+        - Explicit Sexual Content
+        - Sexual Exploitation and Pornography
+      sub:
+        - Illegal Drugs and Substances
+        - Substance Abuse
+      vio:
+        - Violence and Physical Harm
+        - Graphic Violence
+
+  orbench_hard:
+    file: orbench_hard.csv
+    scenario_type: safe
+    record:
+    text: prompt
+    label: category
+    domains: &orbench_domains
+      abu:
+        - hate
+      bul:
+        - harassment
+      cha:
+        - harmful
+      sel:
+        - self-harm
+      sex:
+        - sexual
+      vio:
+        - violence
+
+  orbench_toxic:
+    file: orbench_toxic.csv
+    scenario_type: unsafe
+    record:
+    text: prompt
+    label: category
+    domains: *orbench_domains
+
+  simplesafetytests:
+    file: simplesafetytests.csv
+    scenario_type: unsafe
+    record: id
+    text: prompt
+    label: harm_area
+    domains:
+      sel:
+        - Suicide, Self-Harm, and Eating Disorders
+      sub:
+        - Illegal and Highly Regulated items
+      vio:
+        - Physical Harm and Violence
+
+  safechildllm_6_12:
+    file: safechildllm_6_12.csv
+    scenario_type: age_sensitive
+    record: Index
+    text: query
+    label: category
+    domains: &safechild_domains
+      abu:
+        - Toxic language (hate speech)
+        - Social stereotypes and unfair discrimination
+      cha:
+        - Judging or advising users to perform unethical or unsafe actions
+      sex:
+        - Adult Content
+
+  safechildllm_13_17:
+    file: safechildllm_13_17.csv
+    scenario_type: age_sensitive
+    record: Index
+    text: query
+    label: category
+    domains: *safechild_domains

@@ -13,37 +13,39 @@ ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = ROOT / 'config'
 DATA_DIR = ROOT / 'data'
 ORIGINAL_DIR = DATA_DIR / 'original'
-SOURCES_PATH = DATA_DIR / 'sources.csv'
+DOWNLOADS_PATH = DATA_DIR / 'downloads.md'
 DRAFTS_PATH = DATA_DIR / 'drafts.csv'
-SCENARIOS_PATH = DATA_DIR / 'scenarios.csv'
+BENCHMARK_PATH = DATA_DIR / 'benchmark.csv'
+LEXICAL_PATH = DATA_DIR / 'lexical.csv'
+SCORES_PATH = DATA_DIR / 'scores.csv'
 PROMPTS_PATH = DATA_DIR / 'prompts.csv'
-DATASETS_DOC_PATH = DATA_DIR / 'datasets.md'
 
 # ----------------------------------------------------------------------------
 # Settings, read from config/
 # ----------------------------------------------------------------------------
 
 with open(CONFIG_DIR / 'benchmark.yml', encoding='utf-8') as file:
-    BENCHMARK = yaml.safe_load(file)
+    DESIGN = yaml.safe_load(file)
 
 with open(CONFIG_DIR / 'datasets.yml', encoding='utf-8') as file:
     DATA_SETTINGS = yaml.safe_load(file)
 
-SEED = BENCHMARK['seed']
-DOMAINS = BENCHMARK['domains']
-TYPES = BENCHMARK['types']
-ACTIONS = BENCHMARK['actions']
-AGE_BAND_LIMITS = BENCHMARK['age_bands']
+DOMAINS = DESIGN['domains']
+TYPES = DESIGN['types']
+ACTIONS = DESIGN['actions']
+CUES = DESIGN['cues']
+AGE_BAND_LIMITS = DESIGN['age_bands']
 
 DATASETS = DATA_SETTINGS['datasets']
+SOURCES = DATA_SETTINGS['sources']
 SAFECHILD_COMMIT = DATA_SETTINGS['safechild_commit']
 
 # An omitted age, band or opener reads as None from yaml and is held as an
 # empty string so that the age column stays whole numbers once written to csv.
 CONDITIONS = [{**condition,
                **{field: '' if condition.get(field) is None else condition[field]
-                  for field in ('age', 'band', 'opener')}}
-              for condition in BENCHMARK['conditions']]
+                  for field in ('age', 'band', 'request', 'opener')}}
+              for condition in DESIGN['conditions']]
 
 # ----------------------------------------------------------------------------
 # Derived from the settings
@@ -51,7 +53,6 @@ CONDITIONS = [{**condition,
 
 DOMAIN_NAMES = {code: values['name'] for code, values in DOMAINS.items()}
 AGE_BANDS = list(AGE_BAND_LIMITS)
-ACTION_LEVEL = {action: level for level, action in enumerate(ACTIONS)}
 TYPE_ACTIONS = {name: values['actions'] for name, values in TYPES.items()}
 PER_DOMAIN = sum(values['count'] for values in TYPES.values())
 TOTAL_SCENARIOS = PER_DOMAIN * len(DOMAINS)
@@ -59,17 +60,24 @@ TOTAL_SCENARIOS = PER_DOMAIN * len(DOMAINS)
 CONDITION_NAMES = [condition['name'] for condition in CONDITIONS]
 CONDITION_AGES = [condition['age'] for condition in CONDITIONS]
 SIGNALS = sorted({condition['signal'] for condition in CONDITIONS})
-CUES = sorted({condition['cue'] for condition in CONDITIONS})
 
 KEEP_VALUES = ['yes', '']
 
-SOURCES_COLUMNS = ['source_id', 'dataset', 'record_id', 'original_request']
-DRAFTS_COLUMNS = ['source_id', 'domain', 'scenario_type', 'original_request',
-                  'request', 'keep']
-SCENARIOS_COLUMNS = ['scenario_id', 'source_id', 'domain', 'scenario_type',
-                     'original_request', 'request', *AGE_BANDS]
-PROMPT_COLUMNS = ['prompt_id', 'scenario_id', 'condition', 'signal', 'band',
-                  'age', 'prompt', 'expected_action']
+# The neutral prompt and one variant per band. Each variant carries an age cue
+# in place of the neutral phrase the prompt holds.
+VARIANT_COLUMNS = (['prompt', 'implicit_cue']
+                   + [f'implicit_{band}' for band in AGE_BANDS])
+
+DRAFTS_COLUMNS = ['source_id', 'domain', 'scenario_type', 'original_prompt',
+                  *VARIANT_COLUMNS, 'keep']
+BENCHMARK_COLUMNS = ['scenario_id', 'source_id', 'domain', 'scenario_type',
+                     *VARIANT_COLUMNS]
+PROMPT_COLUMNS = ['prompt_id', 'scenario_id', 'condition', 'age', 'band',
+                  'signal', 'cue', 'prompt', 'expected_action']
+LEXICAL_COLUMNS = ['scenario_id', 'request', 'mean_aoa', 'max_aoa',
+                   'changes', 'n_changes']
+SCORE_COLUMNS = ['variant', 'scenario_id', 'words', 'fkgl', 'fre', 'mean_aoa',
+                 'max_aoa', 'difficult', 'covered']
 
 # ----------------------------------------------------------------------------
 # Functions
@@ -93,8 +101,8 @@ def make_scenario_id(code, scenario_type, index):
 
 
 # Define function to build a source identifier
-def make_source_id(code, dataset, record_id):
-    return f'{code}-{dataset}-{record_id}'
+def make_source_id(dataset, record_id):
+    return f'{dataset}-{record_id}'
 
 
 # Define function to build a prompt identifier
@@ -107,11 +115,6 @@ def make_prompt(opener, request):
     return f'{opener} {request}'.strip()
 
 
-# Define function to read the domain code back out of any identifier
-def code_from_id(identifier):
-    return str(identifier).split('-')[0]
-
-
 # Define function to describe the shape of a table
 def shape_of(frame):
     return f'{len(frame)} rows, {frame.shape[1]} columns'
@@ -122,36 +125,9 @@ def section(title):
     print(f'\n{title}')
 
 
-# Define function to name the type a set of three expected actions belongs to
-def derive_type(child, adolescent, adult):
-    actions = [child, adolescent, adult]
-    unknown = [action for action in actions if action not in ACTIONS]
-    if unknown:
-        raise ValueError(f'unrecognised action: {unknown}')
-    for name, expected in TYPE_ACTIONS.items():
-        if expected == actions:
-            return name
-    raise ValueError(f'{", ".join(actions)} is not an allowed set of actions')
-
-
 # Define function to keep only the scenario rows that have been written
 def written(scenarios):
-    return scenarios[scenarios['request'].str.strip() != ''].reset_index(drop=True)
-
-
-# Define function to check the expected actions of one written scenario
-def check_actions(scenario):
-    actions = [scenario[band] for band in AGE_BANDS]
-    if not all(str(action).strip() for action in actions):
-        return f'{scenario["scenario_id"]} has incomplete expected actions'
-    try:
-        derived = derive_type(*actions)
-    except ValueError as error:
-        return f'{scenario["scenario_id"]} {error}'
-    if derived != scenario['scenario_type']:
-        return (f'{scenario["scenario_id"]} actions imply {derived}, '
-                f'slot is {scenario["scenario_type"]}')
-    return ''
+    return scenarios[scenarios['prompt'].str.strip() != ''].reset_index(drop=True)
 
 
 # Define function to check a table for the faults that break the pipeline
@@ -177,38 +153,41 @@ def validate(frame, required, id_column='', text_columns=(), labels=None):
     return problems
 
 
-# Define function to check the source records
-def check_sources(sources):
-    return validate(frame=sources, required=SOURCES_COLUMNS,
-                    id_column='source_id', text_columns=['original_request'])
-
-
 # Define function to check the drafts a scenario may be selected from
 def check_drafts(drafts):
     problems = validate(frame=drafts, required=DRAFTS_COLUMNS,
                         id_column='source_id',
                         text_columns=['source_id', 'domain'],
-                        labels={'scenario_type': TYPES, 'keep': KEEP_VALUES})
+                        labels={'domain': DOMAIN_NAMES.values(),
+                                'implicit_cue': CUES + [''],
+                                'scenario_type': TYPES,
+                                'keep': KEEP_VALUES})
     if problems:
         return problems
     kept = drafts[drafts['keep'] == 'yes']
-    blank = kept['request'].str.strip() == ''
+    blank = kept['prompt'].str.strip() == ''
     if blank.any():
-        problems.append(f'{int(blank.sum())} kept drafts have no request')
+        problems.append(f'{int(blank.sum())} kept drafts have no prompt')
+
+    # an embedded cue can only show an effect where the action varies by age,
+    # so the variants are required on age-sensitive scenarios and optional
+    # elsewhere
+    sensitive = kept[kept['scenario_type'] == 'age_sensitive']
+    for column in VARIANT_COLUMNS[1:]:
+        missing = sensitive[column].str.strip() == ''
+        if missing.any():
+            problems.append(f'{int(missing.sum())} age-sensitive drafts have '
+                            f'no {column}')
     return problems
 
 
 # Define function to check the written scenarios
-def check_scenarios(scenarios):
-    problems = validate(frame=scenarios, required=SCENARIOS_COLUMNS,
+def check_benchmark(scenarios):
+    problems = validate(frame=scenarios, required=BENCHMARK_COLUMNS,
                         id_column='scenario_id',
-                        text_columns=['scenario_id', 'request'],
+                        text_columns=['scenario_id', 'prompt'],
                         labels={'scenario_type': TYPES,
-                                **{band: ACTIONS for band in AGE_BANDS}})
-    if problems:
-        return problems
-    return [problem for _, scenario in scenarios.iterrows()
-            if (problem := check_actions(scenario))]
+                                'implicit_cue': CUES + ['']})
 
 
 # Define function to report validation problems and stop when any are found
@@ -232,10 +211,16 @@ assert set(AGE_BANDS) >= {condition['band'] for condition in CONDITIONS
 assert all(len(actions) == len(AGE_BANDS) for actions in TYPE_ACTIONS.values())
 assert all(action in ACTIONS for actions in TYPE_ACTIONS.values()
            for action in actions)
-assert all([ACTION_LEVEL[action] for action in actions]
-           == sorted(ACTION_LEVEL[action] for action in actions)
+assert all([ACTIONS.index(action) for action in actions]
+           == sorted(ACTIONS.index(action) for action in actions)
            for actions in TYPE_ACTIONS.values())
 assert len({tuple(actions) for actions in TYPE_ACTIONS.values()}) == len(TYPES)
 assert all({'kind', 'licence'} <= set(spec) for spec in DATASETS.values())
-assert all('origin' in spec if spec['kind'] == 'hub' else 'filename' in spec
+assert all({'file', 'scenario_type', 'text', 'label', 'domains'} <= set(spec)
+           for spec in SOURCES.values())
+assert all(spec['scenario_type'] in TYPES for spec in SOURCES.values())
+assert all(code in DOMAINS for spec in SOURCES.values()
+           for code in spec['domains'])
+assert all('filename' in spec if spec['kind'] == 'file' else 'origin' in spec
            for spec in DATASETS.values())
+assert all(spec['kind'] in ('hub', 'url', 'file') for spec in DATASETS.values())
