@@ -6,7 +6,7 @@ on every run."""
 import pandas as pd
 from settings import (BENCHMARK_COLUMNS, BENCHMARK_PATH,
                       DOMAIN_NAMES, DRAFTS_COLUMNS, DRAFTS_PATH, ORIGINAL_DIR,
-                      PER_DOMAIN, SOURCES, TOTAL_SCENARIOS, TYPE_ACTIONS, TYPES,
+                      PER_DOMAIN, SOURCES, TOTAL_SCENARIOS, TYPE_ANSWERS, TYPES,
                       check_benchmark, check_drafts, make_scenario_id,
                       VARIANT_COLUMNS, make_source_id, report, section,
                       shape_of, written)
@@ -83,7 +83,7 @@ def select(name, spec, original_dir):
     selected = pd.DataFrame({
         'dataset': name,
         'record_id': list(records),
-        'original_prompt': frame[spec['text']].astype(str).str.strip().tolist(),
+        'source_prompt': frame[spec['text']].astype(str).str.strip().tolist(),
         'domain_code': codes.tolist(),
     })
     return selected[selected['domain_code'].notna()].reset_index(drop=True)
@@ -93,23 +93,21 @@ def select(name, spec, original_dir):
 def apply_keyword_rules(sources, rules):
     assigned = pd.Series(False, index=sources.index)
     for code, pattern in rules.items():
-        matches = sources['original_prompt'].str.contains(
+        matches = sources['source_prompt'].str.contains(
             pattern, case=False, regex=True) & ~assigned
         sources.loc[matches, 'domain_code'] = code
         assigned = assigned | matches
-        print(f'Reassigned {int(matches.sum())} records to {DOMAIN_NAMES[code]}')
-    return sources
+    return sources, int(assigned.sum())
 
 
 # Define function to drop records repeating the wording of an earlier one
 def remove_duplicates(sources):
-    normalised = (sources['original_prompt'].str.lower()
+    normalised = (sources['source_prompt'].str.lower()
                   .str.replace(r'[^a-z0-9\s]', '', regex=True)
                   .str.replace(r'\s+', ' ', regex=True).str.strip())
     repeated = sources.assign(normalised=normalised) \
         .duplicated(subset=['domain_code', 'normalised'])
-    print(f'Removed {int(repeated.sum())} repeated records')
-    return sources.loc[~repeated].reset_index(drop=True)
+    return sources.loc[~repeated].reset_index(drop=True), int(repeated.sum())
 
 
 # Define function to give every source record its identifier and domain name
@@ -129,21 +127,23 @@ def report_coverage(sources, per_domain):
         'available': [int(counts.get(code, 0)) for code in DOMAIN_NAMES],
     })
     coverage['to_author'] = (per_domain - coverage['available']).clip(lower=0)
-    section('Coverage by domain')
-    print(coverage.to_string(index=False))
-    if coverage['to_author'].sum():
-        print(f'Unsourced: {int(coverage["to_author"].sum())} scenarios to write '
-              f'without a source record')
+    short = coverage[coverage['to_author'] > 0]
+    if not short.empty:
+        print(f'{int(short["to_author"].sum())} scenarios to write without a '
+              f'source record:')
+        print(short.to_string(index=False))
 
 
 # Define function to open a draft for every source record
 def build_drafts(sources):
     return pd.DataFrame({
         'source_id': sources['source_id'],
+        'dataset': sources['dataset'].map(
+            {name: spec['name'] for name, spec in SOURCES.items()}),
         'domain': sources['domain'],
         'scenario_type': sources['dataset'].map(
             {name: spec['scenario_type'] for name, spec in SOURCES.items()}),
-        'original_prompt': sources['original_prompt'],
+        'source_prompt': sources['source_prompt'],
         **{column: '' for column in VARIANT_COLUMNS},
         'keep': '',
     })[DRAFTS_COLUMNS]
@@ -153,7 +153,7 @@ def build_drafts(sources):
 def merge_drafts(drafts, drafts_path):
     if not drafts_path.exists():
         return drafts, 0
-    previous = pd.read_csv(drafts_path, dtype=str).fillna('')
+    previous = pd.read_csv(drafts_path, dtype=str, keep_default_na=False).fillna('')
     if previous['source_id'].duplicated().any():
         raise ValueError('drafts.csv contains duplicate source_id values')
 
@@ -183,7 +183,7 @@ def build_benchmark(drafts, domains, types):
                 draft = chosen.iloc[index - 1] if index <= len(chosen) else None
                 rows.append({
                     'scenario_id': make_scenario_id(code, scenario_type, index),
-                    'source_id': draft['source_id'] if draft is not None else '',
+                    'dataset': draft['dataset'] if draft is not None else '',
                     'domain': name,
                     'scenario_type': scenario_type,
                     **{column: draft[column] if draft is not None else ''
@@ -200,21 +200,20 @@ def report_selection(drafts, domains, types):
         [[int(counts.get((name, scenario_type), 0)) - values['count']
           for scenario_type, values in types.items()] for name in domains.values()],
         index=list(domains.values()), columns=list(types)).rename_axis('domain')
-    section('Drafts kept against each slot')
+    section('Slots')
     print(selection.to_string())
     short = int(selection.clip(upper=0).abs().to_numpy().sum())
     spare = int(selection.clip(lower=0).to_numpy().sum())
-    print(f'Short: {short} slots have no draft, Spare: {spare} kept drafts unused')
+    print(f'{short} slots short, {spare} kept drafts unused')
 
 
-# Define function to report how the cues are spread across the age-sensitive slots
+# Define function to report how the cue families are spread across the drafts kept
 def report_cues(drafts):
     kept = drafts[(drafts['keep'].str.strip().str.lower() == 'yes')
-                  & (drafts['scenario_type'] == 'age_sensitive')
                   & (drafts['implicit_cue'].str.strip() != '')]
     if kept.empty:
         return
-    section('Cues on the age-sensitive drafts kept')
+    section('Cue families across the drafts kept')
     print(pd.crosstab(kept['domain'], kept['implicit_cue'],
                       margins=True, margins_name='total').to_string())
 
@@ -229,11 +228,12 @@ def build_sources(sources, original_dir):
         raise FileNotFoundError('no raw data found, run download_data.py first')
 
     records = pd.concat(frames, ignore_index=True)
-    records = apply_keyword_rules(sources=records, rules=KEYWORD_RULES)
-    records = remove_duplicates(sources=records)
+    records, moved = apply_keyword_rules(sources=records, rules=KEYWORD_RULES)
+    records, repeated = remove_duplicates(sources=records)
     records = assign_ids(sources=records)
-    print(f'Records: {len(records)} usable '
-          f'from {records["dataset"].nunique()} datasets')
+    print(f'{len(records)} usable records from '
+          f'{records["dataset"].nunique()} datasets, {moved} reassigned by '
+          f'wording, {repeated} duplicates removed')
     return records
 
 
@@ -251,10 +251,10 @@ if __name__ == '__main__':
     drafts = build_drafts(sources=records)
     drafts, kept = merge_drafts(drafts=drafts, drafts_path=DRAFTS_PATH)
     drafts.to_csv(DRAFTS_PATH, index=False)
-    print(f'Drafts: {shape_of(drafts)}')
-    print(f'Kept {kept} written values')
-    print(f'Drafts written: {int((drafts["prompt"].str.strip() != "").sum())} '
-          f'of {len(drafts)}')
+    written_count = int((drafts['request'].str.strip() != '').sum())
+    marked = int(drafts['keep'].str.strip().str.lower().eq('yes').sum())
+    print(f'{len(drafts)} drafts, {written_count} requests written, '
+          f'{marked} kept')
     report('drafts.csv', check_drafts(drafts))
 
     report_selection(drafts=drafts, domains=DOMAIN_NAMES, types=TYPES)
@@ -263,6 +263,5 @@ if __name__ == '__main__':
     section('Benchmark')
     benchmark = build_benchmark(drafts=drafts, domains=DOMAIN_NAMES, types=TYPES)
     benchmark.to_csv(BENCHMARK_PATH, index=False)
-    print(f'Benchmark: {shape_of(benchmark)}')
-    print(f'Scenarios filled: {len(written(benchmark))} of {len(benchmark)}')
+    print(f'{len(benchmark)} scenarios, {len(written(benchmark))} filled')
     report('benchmark.csv', check_benchmark(written(benchmark)))

@@ -1,14 +1,15 @@
 """Scores text for readability and lexical difficulty. Used first to check that
-each implicit variant differs from the neutral prompt in its cue alone, and later on
-the model responses, where the same measures answer whether a model adapts its
-language to the age it was given."""
+each implicit variant differs from the canonical request in its cue alone, and
+later on the model responses, where the same measures answer whether a system
+adapts its language to the age it was given. The age of acquisition norms are
+loaded here rather than imported from the archived simplification script."""
 
 import pandas as pd
 import textstat
 from nltk import pos_tag, word_tokenize
-from settings import (AGE_BANDS, BENCHMARK_PATH, SCORE_COLUMNS, SCORES_PATH,
-                      report, section, shape_of, validate, written)
-from simplify_data import AOA_PATH, age_of, load_aoa
+from settings import (AGE_BANDS, BENCHMARK_PATH, ORIGINAL_DIR, SCORE_COLUMNS,
+                      SCORES_PATH, report, section, shape_of, validate,
+                      variant_column, written)
 
 # ----------------------------------------------------------------------------
 # Settings
@@ -16,6 +17,29 @@ from simplify_data import AOA_PATH, age_of, load_aoa
 
 # A word counts as difficult for a reader of this age when it is acquired later.
 DIFFICULT_ABOVE = 10
+
+# Kuperman, Stadthagen-Gonzalez and Brysbaert (2012), downloaded by
+# download_data.py
+AOA_PATH = ORIGINAL_DIR / 'aoa.csv'
+AOA_WORD_COLUMNS = ['Word', 'word']
+AOA_RATING_COLUMNS = ['AoA_Kup_lem', 'Rating.Mean', 'AoA_Kup', 'aoa']
+
+
+# Define function to read the age of acquisition norms
+def load_aoa(path):
+    if not path.exists():
+        raise FileNotFoundError(f'{path.name} not found, run download_data.py first')
+    frame = pd.read_csv(path)
+    word = next(c for c in AOA_WORD_COLUMNS if c in frame.columns)
+    rating = next(c for c in AOA_RATING_COLUMNS if c in frame.columns)
+    frame = frame[[word, rating]].dropna()
+    return dict(zip(frame[word].astype(str).str.lower(),
+                    pd.to_numeric(frame[rating], errors='coerce')))
+
+
+# Define function to look up the age of acquisition of one word
+def age_of(word, tag, aoa):
+    return aoa.get(str(word).lower())
 
 # ----------------------------------------------------------------------------
 # Functions
@@ -44,7 +68,7 @@ def score(text, aoa):
 
 
 # Define function to score every text in one column of a table
-def score_frame(frame, name, aoa, key='scenario_id', column='prompt'):
+def score_frame(frame, name, aoa, key='scenario_id', column='request'):
     rows = [{'variant': name, key: getattr(row, key), **score(getattr(row, column), aoa)}
             for row in frame.itertuples()]
     return pd.DataFrame(rows)
@@ -64,15 +88,15 @@ if __name__ == '__main__':
     section('Scores')
     norms = load_aoa(AOA_PATH)
 
-    benchmark = written(pd.read_csv(BENCHMARK_PATH, dtype=str).fillna(''))
+    benchmark = written(pd.read_csv(BENCHMARK_PATH, dtype=str, keep_default_na=False).fillna(''))
     if benchmark.empty:
         raise SystemExit('No scenarios written yet.')
-    frames = [score_frame(benchmark, 'neutral', norms)]
+    frames = [score_frame(benchmark, 'canonical', norms)]
     for band in AGE_BANDS:
-        variants = benchmark[benchmark[f'implicit_{band}'].str.strip() != '']
+        column = variant_column(band)
+        variants = benchmark[benchmark[column].str.strip() != '']
         if not variants.empty:
-            frames.append(score_frame(variants, f'implicit_{band}', norms,
-                                      column=f'implicit_{band}'))
+            frames.append(score_frame(variants, column, norms, column=column))
 
 
     scores = pd.concat(frames, ignore_index=True)[SCORE_COLUMNS]

@@ -78,7 +78,7 @@ def fetch_from_file(spec):
 def download(name, spec, original_dir):
     path = original_dir / f'{name}.csv'
     if path.exists():
-        print(f'Skipped {name}, already present')
+        print(f'Skipped {spec["name"]}, already present')
         return True
     try:
         frame = (fetch_from_hub(spec) if spec['kind'] == 'hub'
@@ -87,7 +87,7 @@ def download(name, spec, original_dir):
         print(f'Failed {name}, {type(error).__name__}: {error}')
         return False
     write_once(frame=frame, path=path)
-    print(f'Downloaded {name}, {len(frame)} rows')
+    print(f'Downloaded {spec["name"]}, {len(frame)} rows')
     return True
 
 
@@ -106,10 +106,10 @@ def summarise_downloads(datasets, original_dir):
     rows = []
     for name, spec in datasets.items():
         path = original_dir / f'{name}.csv'
-        rows.append({'dataset': name, 'origin': spec['origin'],
+        rows.append({'dataset': spec['name'], 'origin': spec['origin'],
                      'licence': spec['licence'],
                      'rows': len(pd.read_csv(path)) if path.exists() else 0,
-                     'sha256': file_hash(path)[:16] if path.exists() else ''})
+                     'sha256': file_hash(path) if path.exists() else ''})
     downloads = pd.DataFrame(rows)
     print(f'Datasets: {len(downloads)} files, '
           f'{int(downloads["rows"].sum())} source records')

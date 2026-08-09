@@ -1,7 +1,8 @@
-"""Loads the benchmark design and the dataset settings, then provides the
-helpers the scripts share: identifier construction, the scenario type rule, and
+"""Loads the benchmark design, the dataset settings and the model panel, then
+provides the helpers the scripts share: identifier construction, api keys, and
 validation."""
 
+import os
 from pathlib import Path
 import yaml
 
@@ -11,6 +12,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = ROOT / 'config'
+ENV_PATH = ROOT / '.env'
 DATA_DIR = ROOT / 'data'
 ORIGINAL_DIR = DATA_DIR / 'original'
 DOWNLOADS_PATH = DATA_DIR / 'downloads.md'
@@ -19,6 +21,10 @@ BENCHMARK_PATH = DATA_DIR / 'benchmark.csv'
 LEXICAL_PATH = DATA_DIR / 'lexical.csv'
 SCORES_PATH = DATA_DIR / 'scores.csv'
 PROMPTS_PATH = DATA_DIR / 'prompts.csv'
+RESPONSES_PATH = DATA_DIR / 'responses.csv'
+JUDGEMENTS_PATH = DATA_DIR / 'judgements.csv'
+JUDGED_PATH = DATA_DIR / 'judged.csv'
+DIALOGUES_PATH = DATA_DIR / 'dialogues.csv'
 
 # ----------------------------------------------------------------------------
 # Settings, read from config/
@@ -30,30 +36,71 @@ with open(CONFIG_DIR / 'benchmark.yml', encoding='utf-8') as file:
 with open(CONFIG_DIR / 'datasets.yml', encoding='utf-8') as file:
     DATA_SETTINGS = yaml.safe_load(file)
 
+with open(CONFIG_DIR / 'models.yml', encoding='utf-8') as file:
+    PANEL = yaml.safe_load(file)
+
 DOMAINS = DESIGN['domains']
 TYPES = DESIGN['types']
-ACTIONS = DESIGN['actions']
+SEED = DESIGN['seed']
+ANSWERS = DESIGN['answers']
 CUES = DESIGN['cues']
+SAFETY = DESIGN['safety']
+LANGUAGE = DESIGN['language']
+METHODS = DESIGN['methods']
+PERSISTENCE = DESIGN['persistence']
 AGE_BAND_LIMITS = DESIGN['age_bands']
+EXPLICIT_OPENER = DESIGN['explicit_opener']
+
+MODELS = PANEL['models']
+JUDGE = PANEL['judge']
+GENERATION = PANEL['generation']
+PROVIDER_KEYS = PANEL['keys']
 
 DATASETS = DATA_SETTINGS['datasets']
 SOURCES = DATA_SETTINGS['sources']
+DATASET_NAMES = sorted({spec['name'] for spec in SOURCES.values()})
+DOWNLOAD_NAMES = {name: spec['name'] for name, spec in DATASETS.items()}
 SAFECHILD_COMMIT = DATA_SETTINGS['safechild_commit']
 
-# An omitted age, band or opener reads as None from yaml and is held as an
-# empty string so that the age column stays whole numbers once written to csv.
-CONDITIONS = [{**condition,
-               **{field: '' if condition.get(field) is None else condition[field]
-                  for field in ('age', 'band', 'request', 'opener')}}
-              for condition in DESIGN['conditions']]
+AGE_BANDS = list(AGE_BAND_LIMITS)
+
+
+# Define function to place an age in its band
+def band_for_age(age):
+    if age == '' or age is None:
+        return ''
+    age = int(age)
+    for band, oldest in AGE_BAND_LIMITS.items():
+        if age <= oldest:
+            return band
+    raise ValueError(f'age {age} falls outside every band')
+
+
+# Define function to fill in everything a condition implies from what it states.
+# An explicit condition states an age and the rest follows from it; an implicit
+# condition names a band and takes its request variant from that band and its
+# cue family from the scenario; the control states nothing.
+def expand_condition(condition):
+    age = condition.get('age', '')
+    band = condition.get('band') or band_for_age(age)
+    signal = 'Explicit' if age else ('Implicit' if band else 'None')
+    return {'name': condition['name'],
+            'age': age,
+            'band': band,
+            'signal': signal,
+            'cue': {'Explicit': 'Age', 'Implicit': '', 'None': 'None'}[signal],
+            'variant': band if signal == 'Implicit' else '',
+            'opener': EXPLICIT_OPENER.format(age=age) if age else ''}
+
+
+CONDITIONS = [expand_condition(condition) for condition in DESIGN['conditions']]
 
 # ----------------------------------------------------------------------------
 # Derived from the settings
 # ----------------------------------------------------------------------------
 
 DOMAIN_NAMES = {code: values['name'] for code, values in DOMAINS.items()}
-AGE_BANDS = list(AGE_BAND_LIMITS)
-TYPE_ACTIONS = {name: values['actions'] for name, values in TYPES.items()}
+TYPE_ANSWERS = {name: values['answers'] for name, values in TYPES.items()}
 PER_DOMAIN = sum(values['count'] for values in TYPES.values())
 TOTAL_SCENARIOS = PER_DOMAIN * len(DOMAINS)
 
@@ -63,17 +110,49 @@ SIGNALS = sorted({condition['signal'] for condition in CONDITIONS})
 
 KEEP_VALUES = ['yes', '']
 
-# The neutral prompt and one variant per band. Each variant carries an age cue
-# in place of the neutral phrase the prompt holds.
-VARIANT_COLUMNS = (['prompt', 'implicit_cue']
-                   + [f'implicit_{band}' for band in AGE_BANDS])
+# The canonical request and one variant per band. Each variant carries an age
+# cue in place of the neutral phrase the canonical request holds. The wording
+# runs source_prompt, as the corpus had it, to request, as rewritten here, to
+# prompt, as put to a model.
+# Define function to name the request variant a band uses
+def variant_column(band):
+    return f'implicit_{band.lower()}'
 
-DRAFTS_COLUMNS = ['source_id', 'domain', 'scenario_type', 'original_prompt',
-                  *VARIANT_COLUMNS, 'keep']
-BENCHMARK_COLUMNS = ['scenario_id', 'source_id', 'domain', 'scenario_type',
+
+VARIANT_COLUMNS = (['request', 'implicit_cue']
+                   + [variant_column(band) for band in AGE_BANDS])
+
+DRAFTS_COLUMNS = ['source_id', 'dataset', 'domain', 'scenario_type',
+                  'source_prompt', *VARIANT_COLUMNS, 'keep']
+BENCHMARK_COLUMNS = ['scenario_id', 'dataset', 'domain', 'scenario_type',
                      *VARIANT_COLUMNS]
 PROMPT_COLUMNS = ['prompt_id', 'scenario_id', 'condition', 'age', 'band',
-                  'signal', 'cue', 'prompt', 'expected_action']
+                  'signal', 'cue', 'prompt', 'expected_answer']
+
+# One row per scored reply. The answer is compared against the expectation;
+# the safety measures are reported on their own; the language measures are
+# computed from the reply text.
+JUDGED_COLUMNS = (['prompt_id', 'model', 'replicate', 'answer', 'expected_answer',
+                   'matched'] + list(SAFETY) + LANGUAGE)
+
+# Define function to name a column after a measure
+def measure_column(name):
+    return name.lower().replace(' ', '_')
+
+
+# One row per scored reply: what the model did with the request, the five
+# safety measures, and the language measures computed from the text.
+JUDGEMENT_COLUMNS = (['prompt_id', 'model', 'replicate', 'answer']
+                     + [measure_column(name) for name in SAFETY]
+                     + [measure_column(name) for name in LANGUAGE]
+                     + ['expected_answer', 'deviation'])
+
+# One row per turn of a replayed dialogue. The first assistant turn is a reply
+# already collected single turn, so only the later turns are generated. The
+# method names how the user presses after that reply.
+DIALOGUE_COLUMNS = ['dialogue_id', 'prompt_id', 'scenario_id', 'condition',
+                    'band', 'model', 'opening_replicate', 'method', 'turn',
+                    'role', 'text', 'expected_answer']
 LEXICAL_COLUMNS = ['scenario_id', 'request', 'mean_aoa', 'max_aoa',
                    'changes', 'n_changes']
 SCORE_COLUMNS = ['variant', 'scenario_id', 'words', 'fkgl', 'fre', 'mean_aoa',
@@ -83,18 +162,6 @@ SCORE_COLUMNS = ['variant', 'scenario_id', 'words', 'fkgl', 'fre', 'mean_aoa',
 # Functions
 # ----------------------------------------------------------------------------
 
-# Define function to place an age in its band
-def band_for_age(age):
-    if age == '' or age is None:
-        return ''
-    age = int(age)
-    for band, limits in AGE_BAND_LIMITS.items():
-        upper = limits.get('max_age')
-        if age >= limits['min_age'] and (upper is None or age <= upper):
-            return band
-    raise ValueError(f'age {age} falls outside every band')
-
-
 # Define function to build a scenario identifier
 def make_scenario_id(code, scenario_type, index):
     return f'{code}-{TYPES[scenario_type]["code"]}{index}'
@@ -103,6 +170,11 @@ def make_scenario_id(code, scenario_type, index):
 # Define function to build a source identifier
 def make_source_id(dataset, record_id):
     return f'{dataset}-{record_id}'
+
+
+# Define function to read the domain code back out of a scenario identifier
+def code_from_scenario(scenario_id):
+    return str(scenario_id).split('-')[0]
 
 
 # Define function to build a prompt identifier
@@ -115,19 +187,36 @@ def make_prompt(opener, request):
     return f'{opener} {request}'.strip()
 
 
+# Define function to read the api key a provider expects, from .env
+def api_key(provider):
+    variable = PROVIDER_KEYS.get(provider)
+    if variable is None:
+        return ''
+    if variable not in os.environ and ENV_PATH.exists():
+        for line in ENV_PATH.read_text().splitlines():
+            name, _, value = line.partition('=')
+            if name.strip() and not name.strip().startswith('#'):
+                os.environ.setdefault(name.strip(), value.strip())
+    return os.environ.get(variable, '')
+
+
 # Define function to describe the shape of a table
 def shape_of(frame):
     return f'{len(frame)} rows, {frame.shape[1]} columns'
 
 
 # Define function to head a block of printed output
+_SECTIONS = []
+
+
 def section(title):
-    print(f'\n{title}')
+    print(f'\n{title}' if _SECTIONS else title)
+    _SECTIONS.append(title)
 
 
 # Define function to keep only the scenario rows that have been written
 def written(scenarios):
-    return scenarios[scenarios['prompt'].str.strip() != ''].reset_index(drop=True)
+    return scenarios[scenarios['request'].str.strip() != ''].reset_index(drop=True)
 
 
 # Define function to check a table for the faults that break the pipeline
@@ -159,25 +248,26 @@ def check_drafts(drafts):
                         id_column='source_id',
                         text_columns=['source_id', 'domain'],
                         labels={'domain': DOMAIN_NAMES.values(),
+                                'dataset': DATASET_NAMES + [''],
                                 'implicit_cue': CUES + [''],
                                 'scenario_type': TYPES,
                                 'keep': KEEP_VALUES})
     if problems:
         return problems
     kept = drafts[drafts['keep'] == 'yes']
-    blank = kept['prompt'].str.strip() == ''
+    blank = kept['request'].str.strip() == ''
     if blank.any():
-        problems.append(f'{int(blank.sum())} kept drafts have no prompt')
+        problems.append(f'{int(blank.sum())} kept drafts have no request')
 
-    # an embedded cue can only show an effect where the action varies by age,
-    # so the variants are required on age-sensitive scenarios and optional
-    # elsewhere
-    sensitive = kept[kept['scenario_type'] == 'age_sensitive']
+    # every kept scenario carries the cue variants. On age-sensitive scenarios
+    # they test whether a cue shifts the answer with the band; on harmful and
+    # benign ones, where the expected answer does not vary, they test whether
+    # the cue phrase shifts behaviour on its own, which is the control for the
+    # change in meaning the phrase also carries
     for column in VARIANT_COLUMNS[1:]:
-        missing = sensitive[column].str.strip() == ''
+        missing = kept[column].str.strip() == ''
         if missing.any():
-            problems.append(f'{int(missing.sum())} age-sensitive drafts have '
-                            f'no {column}')
+            problems.append(f'{int(missing.sum())} kept drafts have no {column}')
     return problems
 
 
@@ -185,9 +275,11 @@ def check_drafts(drafts):
 def check_benchmark(scenarios):
     problems = validate(frame=scenarios, required=BENCHMARK_COLUMNS,
                         id_column='scenario_id',
-                        text_columns=['scenario_id', 'prompt'],
+                        text_columns=['scenario_id', 'request'],
                         labels={'scenario_type': TYPES,
+                                'dataset': DATASET_NAMES + [''],
                                 'implicit_cue': CUES + ['']})
+    return problems
 
 
 # Define function to report validation problems and stop when any are found
@@ -208,19 +300,28 @@ assert all(condition['band'] == band_for_age(condition['age'])
 assert len(set(CONDITION_NAMES)) == len(CONDITIONS)
 assert set(AGE_BANDS) >= {condition['band'] for condition in CONDITIONS
                           if condition['band']}
-assert all(len(actions) == len(AGE_BANDS) for actions in TYPE_ACTIONS.values())
-assert all(action in ACTIONS for actions in TYPE_ACTIONS.values()
-           for action in actions)
-assert all([ACTIONS.index(action) for action in actions]
-           == sorted(ACTIONS.index(action) for action in actions)
-           for actions in TYPE_ACTIONS.values())
-assert len({tuple(actions) for actions in TYPE_ACTIONS.values()}) == len(TYPES)
-assert all({'kind', 'licence'} <= set(spec) for spec in DATASETS.values())
-assert all({'file', 'scenario_type', 'text', 'label', 'domains'} <= set(spec)
-           for spec in SOURCES.values())
+assert all(len(answers) == len(AGE_BANDS) for answers in TYPE_ANSWERS.values())
+assert all(answer in ANSWERS for answers in TYPE_ANSWERS.values()
+           for answer in answers)
+assert all([ANSWERS.index(answer) for answer in answers]
+           == sorted(ANSWERS.index(answer) for answer in answers)
+           for answers in TYPE_ANSWERS.values())
+assert len({tuple(answers) for answers in TYPE_ANSWERS.values()}) == len(TYPES)
+assert all({'kind', 'name', 'licence'} <= set(spec) for spec in DATASETS.values())
+assert all({'file', 'name', 'scenario_type', 'text', 'label', 'domains'}
+           <= set(spec) for spec in SOURCES.values())
 assert all(spec['scenario_type'] in TYPES for spec in SOURCES.values())
 assert all(code in DOMAINS for spec in SOURCES.values()
            for code in spec['domains'])
 assert all('filename' in spec if spec['kind'] == 'file' else 'origin' in spec
            for spec in DATASETS.values())
 assert all(spec['kind'] in ('hub', 'url', 'file') for spec in DATASETS.values())
+assert all({'provider', 'id', 'access', 'weights'} <= set(spec)
+           for spec in [*MODELS.values(), JUDGE])
+assert all(spec['access'] in ('api', 'local') for spec in MODELS.values())
+assert all(method in METHODS for method in PERSISTENCE['methods'])
+assert all(len(values) >= 2 for values in SAFETY.values())
+assert all(len(values) >= 2 for values in SAFETY.values())
+assert len({len(spec['turns']) for spec in METHODS.values()}) == 1
+assert all(spec['provider'] in PROVIDER_KEYS for spec in MODELS.values()
+           if spec['access'] == 'api')

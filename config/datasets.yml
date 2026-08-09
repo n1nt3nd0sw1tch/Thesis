@@ -13,6 +13,7 @@ safechild_commit: f69a651ff5c992c6d423b6a129ade8bf674fb63b
 # Downloads
 # ----------------------------------------------------------------------------
 
+# name         the corpus as its authors write it, used in every report
 # kind: hub    downloaded from the Hugging Face Hub, origin is the repository
 # kind: url    downloaded from the origin url as given
 # kind: file   downloaded from a url, filename is resolved against the pinned
@@ -22,24 +23,28 @@ safechild_commit: f69a651ff5c992c6d423b6a129ade8bf674fb63b
 # quietly narrowing the source set.
 datasets:
   xstest:
+    name: XSTest
     kind: hub
     origin: Paul/XSTest
     split: train
     licence: CC BY 4.0
 
   donotanswer:
+    name: DoNotAnswer
     kind: hub
     origin: LibrAI/do-not-answer
     split: train
     licence: Apache 2.0
 
   minorbench:
+    name: MinorBench
     kind: hub
     origin: govtech/MinorBench
     split: test
     licence: MIT
 
   orbench_hard:
+    name: OR-Bench Hard
     kind: hub
     origin: bench-llm/or-bench
     config: or-bench-hard-1k
@@ -47,6 +52,7 @@ datasets:
     licence: CC BY 4.0
 
   orbench_toxic:
+    name: OR-Bench Toxic
     kind: hub
     origin: bench-llm/or-bench
     config: or-bench-toxic
@@ -54,17 +60,20 @@ datasets:
     licence: CC BY 4.0
 
   simplesafetytests:
+    name: SimpleSafetyTests
     kind: hub
     origin: Bertievidgen/SimpleSafetyTests
     split: test
     licence: CC BY-NC 4.0
 
   aoa:
+    name: Kuperman AoA
     kind: url
     origin: https://huggingface.co/datasets/StephanAkkerman/English-Age-of-Acquisition/resolve/main/en.aoa.csv
     licence: CC BY 4.0
 
   safechildllm_6_12:
+    name: Safe-Child-LLM 6-12
     kind: file
     filename: 6_12_ChildSafeLLM.xlsx
     fallback: https://dataverse.harvard.edu/api/access/datafile/11613330
@@ -72,6 +81,7 @@ datasets:
     licence: CC0 1.0
 
   safechildllm_13_17:
+    name: Safe-Child-LLM 13-17
     kind: file
     filename: 13_17_ChildSafeLLM.xlsx
     fallback: https://dataverse.harvard.edu/api/access/datafile/11613329
@@ -86,6 +96,7 @@ datasets:
 # are proposed for different scenario types.
 #
 # file           the downloaded csv
+# name           the corpus as its authors write it, recorded on every draft
 # scenario_type  the type its records are proposed for, edited later in drafts.csv
 # record         column holding the record id, blank to use the row position
 # text           column holding the prompt
@@ -98,7 +109,8 @@ datasets:
 sources:
   xstest_safe:
     file: xstest.csv
-    scenario_type: safe
+    name: XSTest
+    scenario_type: Benign
     record: id
     text: prompt
     label: focus
@@ -138,7 +150,8 @@ sources:
 
   xstest_unsafe:
     file: xstest.csv
-    scenario_type: unsafe
+    name: XSTest
+    scenario_type: Harmful
     record: id
     text: prompt
     label: focus
@@ -155,7 +168,8 @@ sources:
 
   minorbench:
     file: minorbench.csv
-    scenario_type: age_sensitive
+    name: MinorBench
+    scenario_type: Age Sensitive
     record: PromptID
     text: Prompt
     label: Category
@@ -173,7 +187,8 @@ sources:
 
   donotanswer:
     file: donotanswer.csv
-    scenario_type: unsafe
+    name: DoNotAnswer
+    scenario_type: Harmful
     record: id
     text: question
     label: specific_harms
@@ -222,7 +237,8 @@ sources:
 
   orbench_hard:
     file: orbench_hard.csv
-    scenario_type: safe
+    name: OR-Bench
+    scenario_type: Benign
     record:
     text: prompt
     label: category
@@ -242,7 +258,8 @@ sources:
 
   orbench_toxic:
     file: orbench_toxic.csv
-    scenario_type: unsafe
+    name: OR-Bench
+    scenario_type: Harmful
     record:
     text: prompt
     label: category
@@ -250,7 +267,8 @@ sources:
 
   simplesafetytests:
     file: simplesafetytests.csv
-    scenario_type: unsafe
+    name: SimpleSafetyTests
+    scenario_type: Harmful
     record: id
     text: prompt
     label: harm_area
@@ -264,7 +282,8 @@ sources:
 
   safechildllm_6_12:
     file: safechildllm_6_12.csv
-    scenario_type: age_sensitive
+    name: Safe-Child-LLM
+    scenario_type: Age Sensitive
     record: Index
     text: query
     label: category
@@ -279,7 +298,8 @@ sources:
 
   safechildllm_13_17:
     file: safechildllm_13_17.csv
-    scenario_type: age_sensitive
+    name: Safe-Child-LLM
+    scenario_type: Age Sensitive
     record: Index
     text: query
     label: category
