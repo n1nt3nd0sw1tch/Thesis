@@ -2,8 +2,12 @@
 provides the helpers the scripts share: identifier construction, api keys, and
 validation."""
 
+import json
 import os
+import re
 from pathlib import Path
+
+import pandas as pd
 import yaml
 
 # ----------------------------------------------------------------------------
@@ -13,18 +17,39 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = ROOT / 'config'
 ENV_PATH = ROOT / '.env'
+# Data is kept in four directories that follow the order of the work. Sources
+# holds what was downloaded and is never edited. Benchmark holds what the
+# benchmark is made of, ending in the prompts put to a system. Responses holds
+# what came back, and results holds what was made of it. Anything under sources
+# and benchmark is fixed once the benchmark is frozen; anything under responses
+# and results grows as the runs proceed.
 DATA_DIR = ROOT / 'data'
-ORIGINAL_DIR = DATA_DIR / 'original'
-DOWNLOADS_PATH = DATA_DIR / 'downloads.md'
-DRAFTS_PATH = DATA_DIR / 'drafts.csv'
-BENCHMARK_PATH = DATA_DIR / 'benchmark.csv'
-LEXICAL_PATH = DATA_DIR / 'lexical.csv'
-SCORES_PATH = DATA_DIR / 'scores.csv'
-PROMPTS_PATH = DATA_DIR / 'prompts.csv'
-RESPONSES_PATH = DATA_DIR / 'responses.csv'
-JUDGEMENTS_PATH = DATA_DIR / 'judgements.csv'
-JUDGED_PATH = DATA_DIR / 'judged.csv'
-DIALOGUES_PATH = DATA_DIR / 'dialogues.csv'
+
+SOURCES_DIR = DATA_DIR / 'sources'
+ORIGINAL_DIR = SOURCES_DIR / 'original'
+DOWNLOADS_PATH = SOURCES_DIR / 'downloads.md'
+
+BENCHMARK_DIR = DATA_DIR / 'benchmark'
+DRAFTS_PATH = BENCHMARK_DIR / 'drafts.csv'
+BENCHMARK_PATH = BENCHMARK_DIR / 'benchmark.csv'
+PROMPTS_PATH = BENCHMARK_DIR / 'prompts.csv'
+SCORES_PATH = BENCHMARK_DIR / 'scores.csv'
+LEXICAL_PATH = BENCHMARK_DIR / 'lexical.csv'
+
+# Everything a run produces, kept apart from the data because it grows with
+# every run while the benchmark stays fixed. One subfolder per experiment, named
+# as Chapter 4 names them, and within each one file per model, so a run can be
+# repeated or discarded without touching the others.
+RESULTS_DIR = ROOT / 'results'
+ADAPTATION_DIR = RESULTS_DIR / 'adaptation'
+RECOGNITION_DIR = RESULTS_DIR / 'recognition'
+PERSISTENCE_DIR = RESULTS_DIR / 'persistence'
+
+JUDGEMENTS_PATH = RESULTS_DIR / 'judgements.csv'
+JUDGED_PATH = RESULTS_DIR / 'judged.csv'
+
+DATA_DIRS = [SOURCES_DIR, ORIGINAL_DIR, BENCHMARK_DIR, RESULTS_DIR,
+             ADAPTATION_DIR, RECOGNITION_DIR, PERSISTENCE_DIR]
 
 # ----------------------------------------------------------------------------
 # Settings, read from config/
@@ -52,7 +77,8 @@ AGE_BAND_LIMITS = DESIGN['age_bands']
 EXPLICIT_OPENER = DESIGN['explicit_opener']
 
 MODELS = PANEL['models']
-JUDGE = PANEL['judge']
+JUDGES = PANEL['judges']
+JUDGE = JUDGES['primary']
 GENERATION = PANEL['generation']
 PROVIDER_KEYS = PANEL['keys']
 
@@ -135,14 +161,54 @@ PROMPT_COLUMNS = ['prompt_id', 'scenario_id', 'condition', 'age', 'band',
 JUDGED_COLUMNS = (['prompt_id', 'model', 'replicate', 'answer', 'expected_answer',
                    'matched'] + list(SAFETY) + LANGUAGE)
 
+# Define function to turn a model identifier into a filename. A slash separates
+# an owner from a model on the Hugging Face hub and a colon separates a tag in
+# Ollama, and neither belongs in a path.
+def model_slug(model_id):
+    return re.sub(r'[^a-z0-9.-]+', '-', str(model_id).lower()).strip('-')
+
+
+# Define function to name the file one model writes to in one experiment
+def result_path(model_id, directory):
+    return directory / f'{model_slug(model_id)}.jsonl'
+
+
+# Define function to name the file one model's single-turn replies go in
+def adaptation_path(model_id):
+    return result_path(model_id, ADAPTATION_DIR)
+
+
+# Define function to name the file one model's age inferences go in
+def recognition_path(model_id):
+    return result_path(model_id, RECOGNITION_DIR)
+
+
+# Define function to name the file one model's dialogues go in
+def persistence_path(model_id):
+    return result_path(model_id, PERSISTENCE_DIR)
+
+
+# Define function to read every model's replies as one frame
+def read_all(directory):
+    frames = [read_lines(path) for path in sorted(directory.glob('*.jsonl'))]
+    frames = [frame for frame in frames if not frame.empty]
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
 # Define function to name a column after a measure
 def measure_column(name):
     return name.lower().replace(' ', '_')
 
 
+# One record per reply. The identifying fields come first so that scanning the
+# file shows what each line is without reading the reply itself, and the reply
+# comes last because it is the only field of unpredictable length.
+RESPONSE_FIELDS = ['prompt_id', 'model', 'replicate', 'backend', 'temperature',
+                   'error', 'response']
+
 # One row per scored reply: what the model did with the request, the five
 # safety measures, and the language measures computed from the text.
-JUDGEMENT_COLUMNS = (['prompt_id', 'model', 'replicate', 'answer']
+JUDGEMENT_COLUMNS = (['prompt_id', 'model', 'replicate', 'judge', 'answer']
                      + [measure_column(name) for name in SAFETY]
                      + [measure_column(name) for name in LANGUAGE]
                      + ['expected_answer', 'deviation'])
@@ -291,6 +357,25 @@ def report(name, problems):
         print(f'  {name}: {problem}')
     raise SystemExit(f'{len(problems)} validation problems in {name}')
 
+
+# Define function to read a JSON lines file, which is how model output is kept:
+# a reply can hold newlines and quotes that CSV quoting mishandles, and a line
+# appended as each reply arrives survives a run that stops part way
+def read_lines(path):
+    if not path.exists():
+        return pd.DataFrame()
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return pd.DataFrame(rows)
+
+
+# Define function to append one record to a JSON lines file
+def append_line(path, record):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a') as file:
+        file.write(json.dumps(record) + '\n')
+
+
+
 # ----------------------------------------------------------------------------
 # Checks applied to the settings when this module is imported
 # ----------------------------------------------------------------------------
@@ -317,7 +402,7 @@ assert all('filename' in spec if spec['kind'] == 'file' else 'origin' in spec
            for spec in DATASETS.values())
 assert all(spec['kind'] in ('hub', 'url', 'file') for spec in DATASETS.values())
 assert all({'provider', 'id', 'access', 'weights'} <= set(spec)
-           for spec in [*MODELS.values(), JUDGE])
+           for spec in [*MODELS.values(), *JUDGES.values()])
 assert all(spec['access'] in ('api', 'local') for spec in MODELS.values())
 assert all(method in METHODS for method in PERSISTENCE['methods'])
 assert all(len(values) >= 2 for values in SAFETY.values())

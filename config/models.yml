@@ -28,19 +28,19 @@ models:
     provider: openai
     id: gpt-5.4
     access: api
-    weights: closed
+    weights: proprietary
 
   claude:
     provider: anthropic
     id: claude-sonnet-5
     access: api
-    weights: closed
+    weights: proprietary
 
   gemini:
     provider: google
     id: gemini-3-flash
     access: api
-    weights: closed
+    weights: proprietary
 
   llama:
     provider: huggingface
@@ -62,8 +62,21 @@ models:
 
 # Scores the responses against the expected action. Kept apart from the panel
 # so it is never evaluated as one of the models under test.
-judge:
-  provider: huggingface
-  id: openai/gpt-oss-safeguard-20b
-  access: local
-  weights: open
+# Two classifiers score the replies. The first scores every reply and is the one
+# reported. The second scores a stratified subset so that agreement between them
+# can be measured rather than assumed, alongside agreement against the
+# hand-annotated sample. Both sit outside the evaluated panel and neither shares
+# a family with any system in it.
+judges:
+  primary:
+    provider: huggingface
+    id: openai/gpt-oss-safeguard-20b
+    access: local
+    weights: open
+
+  secondary:
+    provider: huggingface
+    id: Qwen/Qwen3.6-27B
+    access: local
+    weights: open
+    share: 0.2
