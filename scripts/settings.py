@@ -16,6 +16,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = ROOT / 'config'
+SCENARIOS_PATH = CONFIG_DIR / 'scenarios.yml'
 ENV_PATH = ROOT / '.env'
 # Data is kept in four directories that follow the order of the work. Sources
 # holds what was downloaded and is never edited. Benchmark holds what the
@@ -64,6 +65,11 @@ with open(CONFIG_DIR / 'datasets.yml', encoding='utf-8') as file:
 with open(CONFIG_DIR / 'models.yml', encoding='utf-8') as file:
     PANEL = yaml.safe_load(file)
 
+# The scenarios are the one part of the design written by hand, so they are kept
+# beside it rather than in a script.
+with open(SCENARIOS_PATH, encoding='utf-8') as file:
+    SCENARIO_SETTINGS = yaml.safe_load(file)
+
 DOMAINS = DESIGN['domains']
 TYPES = DESIGN['types']
 SEED = DESIGN['seed']
@@ -75,6 +81,9 @@ METHODS = DESIGN['methods']
 PERSISTENCE = DESIGN['persistence']
 AGE_BAND_LIMITS = DESIGN['age_bands']
 EXPLICIT_OPENER = DESIGN['explicit_opener']
+
+SCENARIOS = SCENARIO_SETTINGS['scenarios']
+WHO = SCENARIO_SETTINGS['who']
 
 MODELS = PANEL['models']
 JUDGES = PANEL['judges']
@@ -126,6 +135,7 @@ CONDITIONS = [expand_condition(condition) for condition in DESIGN['conditions']]
 # ----------------------------------------------------------------------------
 
 DOMAIN_NAMES = {code: values['name'] for code, values in DOMAINS.items()}
+DOMAIN_CODES = {name: code for code, name in DOMAIN_NAMES.items()}
 TYPE_ANSWERS = {name: values['answers'] for name, values in TYPES.items()}
 PER_DOMAIN = sum(values['count'] for values in TYPES.values())
 TOTAL_SCENARIOS = PER_DOMAIN * len(DOMAINS)
@@ -356,6 +366,13 @@ def report(name, problems):
     for problem in problems:
         print(f'  {name}: {problem}')
     raise SystemExit(f'{len(problems)} validation problems in {name}')
+
+
+# Define function to make the data directories, so a script can write without
+# each one checking first
+def make_directories(directories=DATA_DIRS):
+    for directory in directories:
+        directory.mkdir(parents=True, exist_ok=True)
 
 
 # Define function to read a JSON lines file, which is how model output is kept:

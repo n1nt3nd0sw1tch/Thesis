@@ -30,6 +30,8 @@ ENV/
 # Downloaded datasets
 data/original/
 examples/
+archive/
+
 
 # Model outputs
 results/responses/

@@ -4,7 +4,8 @@ usable source record and is the only file written by hand; benchmark.csv is the
 on every run."""
 
 import pandas as pd
-from settings import (BENCHMARK_COLUMNS, BENCHMARK_PATH,
+from fill_scenarios import check_scenarios, fill
+from settings import (BENCHMARK_COLUMNS, BENCHMARK_PATH, SCENARIOS, SCENARIOS_PATH,
                       DOMAIN_NAMES, DRAFTS_COLUMNS, DRAFTS_PATH, ORIGINAL_DIR,
                       PER_DOMAIN, SOURCES, TOTAL_SCENARIOS, TYPE_ANSWERS, TYPES,
                       check_benchmark, check_drafts, make_scenario_id,
@@ -246,10 +247,19 @@ if __name__ == '__main__':
     records = build_sources(sources=SOURCES, original_dir=ORIGINAL_DIR)
     report_coverage(sources=records, per_domain=PER_DOMAIN)
 
-    section('Scenario drafts')
+    section('Scenarios')
+    report(SCENARIOS_PATH.name, check_scenarios(SCENARIOS))
+
     DRAFTS_PATH.parent.mkdir(parents=True, exist_ok=True)
     drafts = build_drafts(sources=records)
     drafts, kept = merge_drafts(drafts=drafts, drafts_path=DRAFTS_PATH)
+    # the scenarios are specified in scenarios.py and written into the pool here,
+    # so a revision there reaches the benchmark without any file being edited
+    drafts, sourced, authored = fill(drafts=drafts, scenarios=SCENARIOS)
+    print(f'{sourced + authored} scenarios written, {sourced} into a source '
+          f'record and {authored} without one')
+
+    section('Scenario drafts')
     drafts.to_csv(DRAFTS_PATH, index=False)
     written_count = int((drafts['request'].str.strip() != '').sum())
     marked = int(drafts['keep'].str.strip().str.lower().eq('yes').sum())

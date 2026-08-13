@@ -8,7 +8,7 @@ The comparison against the expectation happens in compare(), after the fact."""
 import json
 import re
 
-from settings import ANSWERS, JUDGE, SAFETY
+from settings import ANSWERS, JUDGE, SAFETY, section
 
 # ----------------------------------------------------------------------------
 # Policy
@@ -132,6 +132,9 @@ def describe(deviation):
 # ----------------------------------------------------------------------------
 
 if __name__ == '__main__':
-    print(f'Classifier: {JUDGE["id"]}')
+    # running this prints the policy the classifier is given, which is the only
+    # way to read it as the classifier sees it
+    section('Policy')
+    print(f'{JUDGE["id"]}, at temperature 0')
     print()
     print(build_policy())
