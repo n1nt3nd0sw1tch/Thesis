@@ -1,19 +1,16 @@
 #!/bin/bash -l
 # ----------------------------------------------------------------------------
-# Collects replies to every prompt from one open-source model on a Myriad A100.
+# Runs one stage of the pipeline on a Myriad A100 node.
 #
 #   cd ~/Scratch/thesis
-#   qsub jobs/adaptation.sh
+#   qsub jobs/run.sh                                  generation, default model
+#   qsub -v MODEL=Qwen/Qwen3.6-27B jobs/run.sh        generation, another model
+#   qsub -v STAGE=judge jobs/run.sh                   scoring, every reply
 #   qstat -u $USER
-#   tail -f logs/adaptation.o<job id>
+#   tail -f logs/thesis.o<job id>
 #
-# The model is set below. To run a different one without editing the file:
-#
-#   qsub -v MODEL=Qwen/Qwen3.6-27B jobs/adaptation.sh
-#
-# Replies append to results/adaptation/<model>.jsonl one line at a time, and a
-# rerun skips whatever is already there, so a job that hits the wall clock can
-# be submitted again and will carry on.
+# Results append one line at a time and a rerun skips whatever is already there,
+# so a job that hits the wall clock can be submitted again and will carry on.
 # ----------------------------------------------------------------------------
 
 # Wall clock, memory per core, cores, and a single GPU. The L request asks for
@@ -28,8 +25,9 @@
 #$ -wd /home/ucab281/Scratch/thesis
 #$ -o logs/
 #$ -e logs/
-#$ -N adaptation
+#$ -N thesis
 
+STAGE="${STAGE:-generate}"
 MODEL="${MODEL:-Qwen/Qwen3.6-27B}"
 REPLICATES="${REPLICATES:-3}"
 
@@ -52,7 +50,7 @@ export HF_HOME="$HOME/Scratch/hf"
 export HF_HUB_OFFLINE=1
 export TOKENIZERS_PARALLELISM=false
 
-mkdir -p logs results/adaptation "$HF_HOME"
+mkdir -p logs results "$HF_HOME"
 
 # ----------------------------------------------------------------------------
 # Report what this job is
@@ -60,6 +58,7 @@ mkdir -p logs results/adaptation "$HF_HOME"
 
 echo "job      ${JOB_ID:-interactive} on $(hostname)"
 echo "started  $(date '+%Y-%m-%d %H:%M:%S')"
+echo "stage    ${STAGE}"
 echo "model    ${MODEL}, ${REPLICATES} replicates"
 echo "python   $(python --version 2>&1)"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
@@ -69,10 +68,14 @@ echo
 # Run
 # ----------------------------------------------------------------------------
 
-python scripts/run_generation.py \
-    --model "${MODEL}" \
-    --backend vllm \
-    --replicates "${REPLICATES}"
+if [ "${STAGE}" = "judge" ]; then
+    python scripts/evaluate.py --backend vllm
+else
+    python scripts/run.py generate \
+        --model "${MODEL}" \
+        --backend vllm \
+        --replicates "${REPLICATES}"
+fi
 
 echo
 echo "finished $(date '+%Y-%m-%d %H:%M:%S')"
