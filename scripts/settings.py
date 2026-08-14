@@ -44,7 +44,6 @@ SCORES_PATH = BENCHMARK_DIR / 'scores.csv'
 # repeated or discarded without touching the others.
 RESULTS_DIR = ROOT / 'results'
 ADAPTATION_DIR = RESULTS_DIR / 'adaptation'
-RECOGNITION_DIR = RESULTS_DIR / 'recognition'
 PERSISTENCE_DIR = RESULTS_DIR / 'persistence'
 JUDGEMENTS_DIR = RESULTS_DIR / 'judgements'
 
@@ -52,7 +51,7 @@ JUDGEMENTS_PATH = RESULTS_DIR / 'judgements.csv'
 DIALOGUES_PATH = PERSISTENCE_DIR / 'dialogues.csv'
 
 DATA_DIRS = [SOURCES_DIR, ORIGINAL_DIR, BENCHMARK_DIR, RESULTS_DIR,
-             ADAPTATION_DIR, RECOGNITION_DIR, PERSISTENCE_DIR, JUDGEMENTS_DIR]
+             ADAPTATION_DIR, PERSISTENCE_DIR, JUDGEMENTS_DIR]
 
 # ----------------------------------------------------------------------------
 # Read from config/

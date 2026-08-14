@@ -14,7 +14,7 @@ from datetime import date
 import pandas as pd
 import requests
 from datasets import load_dataset
-from settings import (DATASETS, DOWNLOADS_PATH, ORIGINAL_DIR,
+from scripts.settings import (DATASETS, DOWNLOADS_PATH, ORIGINAL_DIR,
                       SAFECHILD_COMMIT)
 
 # ----------------------------------------------------------------------------

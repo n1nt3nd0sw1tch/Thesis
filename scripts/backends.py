@@ -17,7 +17,7 @@ import urllib.request
 os.environ.setdefault('HF_HUB_DISABLE_PROGRESS_BARS', '1')
 os.environ.setdefault('TRANSFORMERS_VERBOSITY', 'error')
 
-from settings import GENERATION
+from scripts.settings import GENERATION
 
 # Ollama serves an OpenAI-compatible endpoint on this machine
 OLLAMA_URL = os.environ.get('OLLAMA_URL', 'http://localhost:11434')

@@ -30,7 +30,7 @@ import argparse
 
 import pandas as pd
 from evaluate import load_aoa, score_frame
-from settings import (ADAPTATION_DIR, AGE_BANDS, ANSWERS, BENCHMARK_COLUMNS,
+from scripts.settings import (ADAPTATION_DIR, AGE_BANDS, ANSWERS, BENCHMARK_COLUMNS,
                       BENCHMARK_PATH, CONDITION_AGES, CONDITION_NAMES,
                       CONDITIONS, CUES, DIALOGUES_PATH, DIALOGUE_COLUMNS,
                       DOMAIN_CODES, DOMAIN_NAMES, DRAFTS_COLUMNS, DRAFTS_PATH,
@@ -563,56 +563,56 @@ def report_dialogues(dialogues, methods, scenarios):
 
 # Define function to build the benchmark, the prompts and the request scores
 def build_all():
-        section('Source records')
-        records = build_sources(sources=SOURCES, original_dir=ORIGINAL_DIR)
-        report_coverage(sources=records, per_domain=PER_DOMAIN)
+    section('Source records')
+    records = build_sources(sources=SOURCES, original_dir=ORIGINAL_DIR)
+    report_coverage(sources=records, per_domain=PER_DOMAIN)
 
-        section('Scenarios')
-        report(SCENARIOS_PATH.name, check_scenarios(SCENARIOS))
+    section('Scenarios')
+    report(SCENARIOS_PATH.name, check_scenarios(SCENARIOS))
 
-        DRAFTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        drafts = build_drafts(sources=records)
-        drafts, kept = merge_drafts(drafts=drafts, drafts_path=DRAFTS_PATH)
-        # the scenarios are specified in config/scenarios.yml and written into the
-        # pool here, so a revision there reaches the benchmark without any file
-        # being edited by hand
-        drafts, sourced, authored = fill(drafts=drafts, scenarios=SCENARIOS)
-        print(f'{sourced + authored} scenarios written, {sourced} into a source '
-              f'record and {authored} without one')
+    DRAFTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    drafts = build_drafts(sources=records)
+    drafts, _ = merge_drafts(drafts=drafts, drafts_path=DRAFTS_PATH)
+    # the scenarios are specified in config/scenarios.yml and written into the
+    # pool here, so a revision there reaches the benchmark without any file
+    # being edited by hand
+    drafts, sourced, authored = fill(drafts=drafts, scenarios=SCENARIOS)
+    print(f'{sourced + authored} scenarios written, {sourced} into a source '
+          f'record and {authored} without one')
 
-        section('Scenario drafts')
-        drafts.to_csv(DRAFTS_PATH, index=False)
-        written_count = int((drafts['request'].str.strip() != '').sum())
-        marked = int(drafts['keep'].str.strip().str.lower().eq('yes').sum())
-        print(f'{len(drafts)} drafts, {written_count} requests written, '
-              f'{marked} kept')
-        report('drafts.csv', check_drafts(drafts))
+    section('Scenario drafts')
+    drafts.to_csv(DRAFTS_PATH, index=False)
+    written_count = int((drafts['request'].str.strip() != '').sum())
+    marked = int(drafts['keep'].str.strip().str.lower().eq('yes').sum())
+    print(f'{len(drafts)} drafts, {written_count} requests written, '
+          f'{marked} kept')
+    report('drafts.csv', check_drafts(drafts))
 
-        report_selection(drafts=drafts, domains=DOMAIN_NAMES, types=TYPES)
-        report_cues(drafts=drafts)
+    report_selection(drafts=drafts, domains=DOMAIN_NAMES, types=TYPES)
+    report_cues(drafts=drafts)
 
-        section('Benchmark')
-        benchmark = build_benchmark(drafts=drafts, domains=DOMAIN_NAMES, types=TYPES)
-        benchmark.to_csv(BENCHMARK_PATH, index=False)
-        filled = written(benchmark)
-        print(f'{len(benchmark)} scenarios, {len(filled)} filled')
-        report('benchmark.csv', check_benchmark(filled))
-        if filled.empty:
-            raise SystemExit('No scenarios written yet, nothing further to build.')
+    section('Benchmark')
+    benchmark = build_benchmark(drafts=drafts, domains=DOMAIN_NAMES, types=TYPES)
+    benchmark.to_csv(BENCHMARK_PATH, index=False)
+    filled = written(benchmark)
+    print(f'{len(benchmark)} scenarios, {len(filled)} filled')
+    report('benchmark.csv', check_benchmark(filled))
+    if filled.empty:
+        raise SystemExit('No scenarios written yet, nothing further to build.')
 
-        section('Model prompts')
-        prompts = build_prompts(scenarios=filled, conditions=CONDITIONS)
-        report('prompts.csv', check_prompts(prompts=prompts, scenarios=filled))
-        prompts.to_csv(PROMPTS_PATH, index=False)
-        report_prompts(prompts=prompts)
+    section('Model prompts')
+    prompts = build_prompts(scenarios=filled, conditions=CONDITIONS)
+    report('prompts.csv', check_prompts(prompts=prompts, scenarios=filled))
+    prompts.to_csv(PROMPTS_PATH, index=False)
+    report_prompts(prompts=prompts)
 
-        section('Request scores')
-        scores = score_variants(benchmark=filled, norms=load_aoa())
-        print(f'Scores: {shape_of(scores)}')
-        report('scores.csv', validate(frame=scores, required=SCORE_COLUMNS,
-                                      text_columns=['variant', 'scenario_id']))
-        scores.to_csv(SCORES_PATH, index=False)
-        report_comparison(scores=scores)
+    section('Request scores')
+    scores = score_variants(benchmark=filled, norms=load_aoa())
+    print(f'Scores: {shape_of(scores)}')
+    report('scores.csv', validate(frame=scores, required=SCORE_COLUMNS,
+                                  text_columns=['variant', 'scenario_id']))
+    scores.to_csv(SCORES_PATH, index=False)
+    report_comparison(scores=scores)
 
 
 # Define function to build the replayed dialogues of the persistence extension

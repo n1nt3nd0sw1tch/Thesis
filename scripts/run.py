@@ -32,7 +32,7 @@ import requests
 from backends import BACKENDS, ask, generate
 from evaluate import (JUDGE_TEMPERATURE, JUDGE_TOKENS, OLLAMA_JUDGE, build_item,
                       build_policy, compare, describe, read)
-from settings import (ADAPTATION_DIR, BENCHMARK_PATH, GENERATION, JUDGE,
+from scripts.settings import (ADAPTATION_DIR, BENCHMARK_PATH, GENERATION, JUDGE,
                       MODELS, PROMPTS_PATH, PROVIDER_KEYS)
 from utils import (announce, api_key, collect, make_directories, outstanding,
                    read_all, read_lines, read_table, result_path, section,

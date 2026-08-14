@@ -12,7 +12,7 @@ import re
 import time
 
 import pandas as pd
-from settings import (BENCHMARK_COLUMNS, CUES, DATASET_NAMES, DATA_DIRS,
+from scripts.settings import (BENCHMARK_COLUMNS, CUES, DATASET_NAMES, DATA_DIRS,
                       DOMAIN_NAMES, DRAFTS_COLUMNS, ENV_PATH, KEEP_VALUES,
                       PROVIDER_KEYS, TYPES, VARIANT_COLUMNS)
 
