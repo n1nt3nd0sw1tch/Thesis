@@ -146,54 +146,49 @@ def batch_path(model_id, suffix):
     return RESULTS_DIR / f'batch-{model_slug(model_id)}-{suffix}.jsonl'
 
 
-# Define function to write the batch file to upload
-def run_export(arguments):
-    section('Batch export')
+# Define function to write the batch file to upload, skipping anything already
+# collected so that it composes with a run that stopped part way
+def write_batch(model, endpoint='/v1/responses', replicates=None, max_tokens=None,
+                temperature=None, limit=0):
+    replicates = GENERATION['replicates'] if replicates is None else replicates
+    max_tokens = GENERATION['max_tokens'] if max_tokens is None else max_tokens
+    temperature = GENERATION['temperature'] if temperature is None else temperature
     prompts = read_table(PROMPTS_PATH)
-    provider = provider_of(arguments.model)
-    collected = read_lines(result_path(arguments.model, ADAPTATION_DIR))
+    provider = provider_of(model)
 
-    wanted = [{'prompt_id': prompt_id, 'model': arguments.model,
-               'replicate': replicate, 'backend': 'api',
-               'temperature': arguments.temperature}
+    wanted = [{'prompt_id': prompt_id, 'model': model, 'replicate': replicate,
+               'backend': 'api', 'temperature': temperature}
               for prompt_id in prompts['prompt_id']
-              for replicate in range(1, arguments.replicates + 1)]
-    pending = outstanding(wanted=wanted, collected=collected,
-                          keys=['prompt_id', 'replicate'])
-    if arguments.limit:
-        pending = pending[:arguments.limit]
+              for replicate in range(1, replicates + 1)]
+    pending = outstanding(wanted=wanted, keys=['prompt_id', 'replicate'],
+                          collected=read_lines(result_path(model, ADAPTATION_DIR)))
+    if limit:
+        pending = pending[:limit]
     if not pending:
-        raise SystemExit('nothing outstanding')
+        return None, 0
 
     by_id = dict(zip(prompts['prompt_id'], prompts['prompt']))
-    path = batch_path(arguments.model, 'requests')
+    path = batch_path(model, 'requests')
     path.unlink(missing_ok=True)
     for item in pending:
         body = build_payload(
-            provider, arguments.model,
+            provider, model,
             [{'role': 'user', 'content': by_id[item['prompt_id']]}],
-            arguments.max_tokens, item['temperature'])
+            max_tokens, item['temperature'])
         append_line(path, {'custom_id': f'{item["prompt_id"]}-r{item["replicate"]}',
-                           'method': 'POST', 'url': arguments.endpoint,
-                           'body': body})
-
-    print(f'{len(pending):,} requests for {arguments.model} on {provider}')
-    print(f'written to {path}')
-    print(f'\nUpload it in the provider console, endpoint {arguments.endpoint}, '
-          f'then when the job finishes:')
-    print(f'    python scripts/run.py ingest --model {arguments.model} '
-          f'--file <downloaded results>.jsonl')
-    return 0
+                           'method': 'POST', 'url': endpoint, 'body': body})
+    return path, len(pending)
 
 
-# Define function to read a finished batch back into the results
-def run_ingest(arguments):
-    section('Batch ingest')
-    source = Path(arguments.file)
+# Define function to read a finished batch into the results, writing the same
+# records live generation writes so that nothing downstream can tell them apart
+def read_batch(model, source, temperature=None):
+    temperature = GENERATION['temperature'] if temperature is None else temperature
+    source = Path(source)
     if not source.exists():
-        raise SystemExit(f'{source} not found')
-    provider = provider_of(arguments.model)
-    path = result_path(arguments.model, ADAPTATION_DIR)
+        raise FileNotFoundError(f'{source} not found')
+    provider = provider_of(model)
+    path = result_path(model, ADAPTATION_DIR)
 
     read, failed = 0, 0
     for line in source.read_text().splitlines():
@@ -209,18 +204,45 @@ def run_ingest(arguments):
             failed += 1
         else:
             record_usage(provider, body)
-        append_line(path, {'prompt_id': prompt_id, 'model': arguments.model,
+        append_line(path, {'prompt_id': prompt_id, 'model': model,
                            'replicate': replicate, 'backend': 'batch',
-                           'temperature': arguments.temperature, 'error': error,
+                           'temperature': temperature, 'error': error,
                            'response': '' if error else read_reply(provider, body)})
         read += 1
+    return read, failed
 
-    print(f'{read:,} replies read into {path.name}, {failed} failed')
+
+# Define function to write the batch file from the command line
+def run_export(arguments):
+    section('Batch export')
+    path, count = write_batch(model=arguments.model, endpoint=arguments.endpoint,
+                              replicates=arguments.replicates,
+                              max_tokens=arguments.max_tokens,
+                              temperature=arguments.temperature,
+                              limit=arguments.limit)
+    if path is None:
+        raise SystemExit('nothing outstanding')
+    print(f'{count:,} requests for {arguments.model} on '
+          f'{provider_of(arguments.model)}')
+    print(f'written to {path}')
+    print(f'\nUpload it in the provider console, endpoint {arguments.endpoint}, '
+          f'then when the job finishes:')
+    print(f'    python scripts/run.py ingest --model {arguments.model} '
+          f'--file <downloaded results>.jsonl')
+    return 0
+
+
+# Define function to read a finished batch from the command line
+def run_ingest(arguments):
+    section('Batch ingest')
+    read, failed = read_batch(model=arguments.model, source=arguments.file,
+                              temperature=arguments.temperature)
+    print(f'{read:,} replies read into '
+          f'{result_path(arguments.model, ADAPTATION_DIR).name}, {failed} failed')
     cost = spent(arguments.model)
     if cost is not None:
-        usage = USAGE
-        print(f'{usage["input"]:,} input and {usage["output"]:,} output tokens, '
-              f'${cost:,.2f} at the standard rate, ${cost / 2:,.2f} at the batch rate')
+        print(f'{USAGE["input"]:,} input and {USAGE["output"]:,} output tokens, '
+              f'${cost:,.2f} at the standard rate, ${cost / 2:,.2f} batched')
     return 0
 
 

@@ -1,0 +1,26 @@
+# The pipeline. Versions are pinned so that a rerun on another machine gives the
+# same files, and are the ones the reported results were produced with.
+pandas==2.2.3
+pyyaml==6.0.2
+requests==2.32.3
+datasets==3.2.0
+openpyxl==3.1.5
+
+# Language measures
+textstat==0.7.7
+nltk==3.9.1
+
+# The proprietary panel. Only the OpenAI SDK is needed, and only by the batch
+# notebook: the api backend itself speaks to all three providers over http.
+openai==1.99.1
+
+# Local inference. Only the runtime a given machine uses is needed: vllm on the
+# A100 nodes, mlx-lm on Apple silicon, transformers anywhere. Ollama is a server
+# rather than a package and is reached over http.
+transformers==4.48.0
+# vllm==0.7.2
+# mlx-lm==0.21.1
+
+# Notebooks
+jupyter==1.1.1
+matplotlib==3.10.0
