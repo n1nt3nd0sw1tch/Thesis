@@ -76,7 +76,7 @@ def fetch_from_file(spec):
                     else pd.read_csv(payload))
         except Exception as error:
             print(f'Failed {url.split("/")[2]}, {type(error).__name__}: {error}')
-    raise ConnectionError('no source reachable')
+    raise ConnectionError('No source reachable')
 
 
 # Define function to download one dataset unless it is already present

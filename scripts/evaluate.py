@@ -234,7 +234,7 @@ def score_frame(frame, name, aoa, key='scenario_id', column='request'):
 def load_replies(model=''):
     replies = read_all(ADAPTATION_DIR)
     if replies.empty:
-        raise SystemExit('no replies collected yet, run run.py generate first')
+        raise SystemExit('No replies collected yet, run run.py generate first')
     replies = replies[replies['error'].astype(str).str.strip() == '']
     return replies[replies['model'] == model] if model else replies
 
@@ -288,7 +288,7 @@ def run_judging(arguments):
         pending = announce(path=path, wanted=wanted, pending=pending,
                            limit=arguments.limit)
         if not pending:
-            print('  nothing outstanding')
+            print('  Nothing outstanding')
             continue
 
         def produce(item, model=model):

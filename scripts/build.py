@@ -203,7 +203,7 @@ def build_sources(sources, original_dir):
               for name, spec in sources.items()]
     frames = [frame for frame in frames if frame is not None]
     if not frames:
-        raise FileNotFoundError('no raw data found, run download.py first')
+        raise FileNotFoundError('No raw data found, run download.py first')
 
     records = pd.concat(frames, ignore_index=True)
     records, moved = apply_keyword_rules(sources=records, rules=KEYWORD_RULES)
@@ -373,7 +373,7 @@ def load_responses(directory=ADAPTATION_DIR):
     responses = read_all(directory)
     if responses.empty:
         raise FileNotFoundError(
-            f'nothing in {directory.name}, run the generate stage first')
+            f'Nothing in {directory.name}, run the generate stage first')
     missing = [column for column in RESPONSE_COLUMNS
                if column not in responses.columns]
     if missing:

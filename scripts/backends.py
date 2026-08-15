@@ -25,7 +25,7 @@ import urllib.request
 os.environ.setdefault('HF_HUB_DISABLE_PROGRESS_BARS', '1')
 os.environ.setdefault('TRANSFORMERS_VERBOSITY', 'error')
 
-from settings import GENERATION, JUDGES, MODELS, SAFETY_IDENTIFIER
+from settings import GENERATION, JUDGES, MODELS
 from utils import api_key
 
 # Ollama serves an OpenAI-compatible endpoint on this machine
@@ -93,7 +93,7 @@ def generate_ollama(model_id, messages, max_tokens, temperature):
         with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
             body = json.loads(response.read())
     except urllib.error.URLError as problem:
-        raise SystemExit(f'no Ollama server at {OLLAMA_URL}: {problem.reason}. '
+        raise SystemExit(f'No Ollama server at {OLLAMA_URL}: {problem.reason}. '
                          f'Start it with `ollama serve` and fetch the model '
                          f'with `ollama pull {model_id}`.')
     # a reasoning model returns its thinking separately from its answer
@@ -176,9 +176,12 @@ def panel_entry(model_id, field, default=None):
     return default
 
 
-# Define function to read the reasoning effort a model should be run at
+# Define function to read the reasoning effort a model should be run at. An
+# absent setting, or the word default, sends nothing and leaves the provider to
+# decide, which is what a user of the deployed system receives.
 def reasoning_of(model_id):
-    return panel_entry(model_id, 'reasoning', '')
+    effort = str(panel_entry(model_id, 'reasoning', '') or '').strip().lower()
+    return '' if effort in ('', 'default') else effort
 
 
 # Define function to find which provider serves a model, from the panel rather
@@ -199,7 +202,13 @@ def build_payload(provider, model_id, messages, max_tokens, temperature):
     turns = [m for m in messages if m['role'] != 'system']
     effort = reasoning_of(model_id)
     if provider == 'openai':
+        # Sampling is set explicitly rather than left to the provider, so that
+        # every model in the panel is decoded the same way. Left unset, this arm
+        # runs at the OpenAI defaults of temperature 1.0 and top_p 0.98 while
+        # the others run at what the design asks for, and the replicate
+        # agreement measure then compares models sampled differently.
         payload = {'model': model_id, 'max_output_tokens': max_tokens,
+                   'temperature': temperature, 'top_p': GENERATION['top_p'],
                    'input': [{'role': m['role'], 'content': m['content']}
                              for m in turns]}
         if system:
@@ -209,11 +218,6 @@ def build_payload(provider, model_id, messages, max_tokens, temperature):
         # writes anything
         if effort:
             payload['reasoning'] = {'effort': effort}
-        # attributes the request to the study rather than to the account, so
-        # that a benchmark of harmful prompts does not read as the account
-        # itself behaving badly
-        if SAFETY_IDENTIFIER:
-            payload['safety_identifier'] = SAFETY_IDENTIFIER
         return payload
     if provider == 'anthropic':
         payload = {'model': model_id, 'max_tokens': max_tokens,
@@ -283,7 +287,7 @@ def generate_api(model_id, messages, max_tokens, temperature):
     spec = PROVIDERS[provider]
     key = api_key(provider)
     if not key:
-        raise SystemExit(f'no api key for {provider}. Put it in .env as '
+        raise SystemExit(f'No api key for {provider}. Put it in .env as '
                          f'{provider.upper()}_API_KEY, which is not committed.')
 
     payload = build_payload(provider, model_id, messages, max_tokens, temperature)

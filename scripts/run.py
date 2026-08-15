@@ -89,7 +89,7 @@ def run_generation(arguments):
     pending = announce(path=path, wanted=wanted, pending=pending,
                        limit=arguments.limit)
     if not pending:
-        raise SystemExit('nothing outstanding')
+        raise SystemExit('Nothing outstanding')
 
     def produce(item):
         return {'response': ask(item['backend'], item['model'],
@@ -197,25 +197,28 @@ def write_batch(model, endpoint='/v1/responses', replicates=None, max_tokens=Non
     return path, len(pending)
 
 
-# Define function to move a model's collected replies out of the way before it
-# is run again. Ingest appends, so a rerun over an existing file would leave two
-# replies per prompt with no way to tell which request produced which. The old
-# pass is kept, out of the directory the pipeline reads, because it is evidence
-# of what the model did under the earlier conditions.
-def archive_replies(model):
+# Define function to set a model's collected replies aside before it is run
+# again. Ingest appends and skips what it already has, so a rerun over an
+# existing file would either be skipped entirely or leave two replies per prompt
+# collected under different request parameters. The earlier pass is kept rather
+# than deleted, outside the directory the pipeline reads, because it is evidence
+# of what the model did under the conditions that produced it.
+def set_aside_replies(model):
     current = result_path(model, ADAPTATION_DIR)
     if not current.exists():
         return None
-    stamp = datetime.now().strftime('%Y%m%d-%H%M')
-    archive = ADAPTATION_DIR.parent / 'archive'
-    archive.mkdir(parents=True, exist_ok=True)
-    moved = archive / f'{current.stem}.{stamp}.jsonl'
+    aside = ADAPTATION_DIR.parent / 'superseded'
+    aside.mkdir(parents=True, exist_ok=True)
+    moved = aside / f'{current.stem}.{datetime.now():%Y%m%d-%H%M}.jsonl'
     current.replace(moved)
     return moved
 
 
 # Define function to read a finished batch into the results, writing the same
-# records live generation writes so that nothing downstream can tell them apart
+# records live generation writes so that nothing downstream can tell them apart.
+# Anything already collected for a prompt and replicate is skipped: ingesting the
+# same file twice, or two batches covering the same prompts, would otherwise
+# leave duplicate rows that no later stage could tell apart.
 def read_batch(model, source, temperature=None):
     temperature = GENERATION['temperature'] if temperature is None else temperature
     source = Path(source)
@@ -224,23 +227,20 @@ def read_batch(model, source, temperature=None):
     provider = provider_of(model)
     path = result_path(model, ADAPTATION_DIR)
 
-    # a second pass over the same prompts would write a second row for every
-    # replicate already present, and no later stage could tell the two apart,
-    # so anything already collected is skipped rather than duplicated
-    already = read_lines(path)
-    seen = set() if already.empty else {
-        (str(row['prompt_id']), str(row['replicate']))
-        for _, row in already.iterrows()}
+    collected = read_lines(path)
+    seen = set() if collected.empty else {
+        (str(row.prompt_id), str(row.replicate)) for row in collected.itertuples()}
 
-    read, failed, duplicate = 0, 0, 0
+    read, failed, truncated, repeated = 0, 0, 0, 0
     for line in source.read_text().splitlines():
         if not line.strip():
             continue
         row = json.loads(line)
         prompt_id, _, replicate = row['custom_id'].rpartition('-r')
         if (prompt_id, replicate) in seen:
-            duplicate += 1
+            repeated += 1
             continue
+
         response = row.get('response') or {}
         body = response.get('body') or {}
         error = ''
@@ -249,15 +249,18 @@ def read_batch(model, source, temperature=None):
             failed += 1
         else:
             record_usage(provider, body)
+            # a reply stopped by the token cap has a censored length rather than
+            # a measured one, and Response Length is an outcome measure
+            if body.get('incomplete_details') or body.get('status') == 'incomplete':
+                truncated += 1
+
         append_line(path, {'prompt_id': prompt_id, 'model': model,
                            'replicate': replicate, 'backend': 'batch',
                            'temperature': temperature, 'error': error,
                            'response': '' if error else read_reply(provider, body)})
+        seen.add((prompt_id, replicate))
         read += 1
-    if duplicate:
-        print(f'{duplicate:,} skipped, already collected for this model. Move '
-              f'{path.name} aside first if this is meant to replace it.')
-    return read, failed
+    return read, failed, truncated, repeated
 
 
 # Define function to write the batch file from the command line
@@ -269,10 +272,10 @@ def run_export(arguments):
                               temperature=arguments.temperature,
                               limit=arguments.limit, fresh=arguments.fresh)
     if path is None:
-        raise SystemExit('nothing outstanding')
+        raise SystemExit('Nothing outstanding')
     print(f'{count:,} requests for {arguments.model} on '
           f'{provider_of(arguments.model)}')
-    print(f'written to {path}')
+    print(f'Written to {path}')
     print(f'\nUpload it in the provider console, endpoint {arguments.endpoint}, '
           f'then when the job finishes:')
     print(f'    python scripts/run.py ingest --model {arguments.model} '
@@ -283,10 +286,16 @@ def run_export(arguments):
 # Define function to read a finished batch from the command line
 def run_ingest(arguments):
     section('Batch ingest')
-    read, failed = read_batch(model=arguments.model, source=arguments.file,
-                              temperature=arguments.temperature)
+    read, failed, truncated, repeated = read_batch(
+        model=arguments.model, source=arguments.file,
+        temperature=arguments.temperature)
     print(f'{read:,} replies read into '
           f'{result_path(arguments.model, ADAPTATION_DIR).name}, {failed} failed')
+    if repeated:
+        print(f'{repeated:,} already collected and skipped')
+    if truncated:
+        print(f'{truncated} replies hit the {GENERATION["max_tokens"]} token cap, '
+              f'so their length is censored rather than measured')
     cost = spent(arguments.model)
     if cost is not None:
         print(f'{USAGE["input"]:,} input and {USAGE["output"]:,} output tokens, '
@@ -389,19 +398,19 @@ def trace(arguments):
 
     section('Reply')
     if arguments.reply:
-        print('supplied, not generated')
+        print('Supplied, not generated')
         reply = arguments.reply
     else:
-        print(f'generating with {arguments.model} on {arguments.backend}')
+        print(f'Generating with {arguments.model} on {arguments.backend}')
         reply = ask(arguments.backend, arguments.model, row['prompt'])
     show('Returned', reply)
 
     section('Judgement')
     if arguments.verdict:
-        print('supplied, classifier not called')
+        print('Supplied, classifier not called')
         output = arguments.verdict
     else:
-        print(f'scoring with {arguments.judge}')
+        print(f'Scoring with {arguments.judge}')
         # the classifier sees the canonical request, never the cued variant or
         # the opener, so it cannot infer which condition produced the reply
         output = generate(arguments.backend, arguments.judge,
@@ -412,7 +421,7 @@ def trace(arguments):
                           temperature=JUDGE_TEMPERATURE)
     verdict, problems = read(output)
     for problem in problems:
-        print(f'  unreadable, {problem}')
+        print(f'  Unreadable, {problem}')
     for field, value in (verdict or {}).items():
         print(f'  {field:<20} {value}')
 
@@ -420,9 +429,9 @@ def trace(arguments):
     expected = row['expected_answer']
     observed = (verdict or {}).get('answer', '')
     deviation = compare(observed=observed, expected=expected)
-    print(f'  expected             {expected or "none, this is the control"}')
-    print(f'  observed             {observed or "not read"}')
-    print(f'  deviation            '
+    print(f'  Expected             {expected or "None, this is the control"}')
+    print(f'  Observed             {observed or "not read"}')
+    print(f'  Deviation            '
           f'{deviation if deviation is not None else "n/a"}  ({describe(deviation)})')
 
 

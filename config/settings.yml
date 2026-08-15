@@ -606,7 +606,6 @@ generation:
 # it varied by condition, any treatment the provider applied to a flagged
 # identifier would fall unevenly across conditions and could not be told apart
 # from an effect of the age signal.
-safety_identifier: does-age-matter-ucl-2026
 
 keys:
   openai: OPENAI_API_KEY
@@ -619,7 +618,6 @@ models:
     id: gpt-5.6-luna
     access: api
     weights: proprietary
-    reasoning: none
     price: {input: 0.20, output: 1.20}
 
   claude:
@@ -627,7 +625,6 @@ models:
     id: claude-sonnet-5
     access: api
     weights: proprietary
-    reasoning: none
     price: {input: 2.00, output: 10.00}
 
   gemini:
@@ -635,7 +632,6 @@ models:
     id: gemini-3-flash
     access: api
     weights: proprietary
-    reasoning: none
     price: {input: 0.25, output: 1.50}
 
   llama:

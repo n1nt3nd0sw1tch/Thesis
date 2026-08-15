@@ -87,7 +87,6 @@ SAFECHILD_COMMIT = SETTINGS['safechild_commit']
 
 GENERATION = SETTINGS['generation']
 PROVIDER_KEYS = SETTINGS['keys']
-SAFETY_IDENTIFIER = SETTINGS.get('safety_identifier', '')
 MODELS = SETTINGS['models']
 JUDGES = SETTINGS['judges']
 JUDGE = JUDGES['primary']
@@ -118,7 +117,7 @@ def band_for_age(age):
     for band, oldest in AGE_BAND_LIMITS.items():
         if age <= oldest:
             return band
-    raise ValueError(f'age {age} falls outside every band')
+    raise ValueError(f'Age {age} falls outside every band')
 
 
 # Define function to name a column after a measure
