@@ -27,6 +27,7 @@ supplied text, which exercises the scoring path without loading a large model.
 import argparse
 import json
 import textwrap
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -38,7 +39,7 @@ from backends import (BATCH_SIZE, BATCHED, BACKENDS, USAGE, ask, build_payload,
 from evaluate import (JUDGE_TEMPERATURE, JUDGE_TOKENS, OLLAMA_JUDGE, build_item,
                       build_policy, compare, describe, read)
 from settings import (ADAPTATION_DIR, BENCHMARK_PATH, GENERATION, JUDGE,
-                      MODELS, PROMPTS_PATH, PROVIDER_KEYS, RESULTS_DIR)
+                      BATCHES_DIR, MODELS, PROMPTS_PATH, PROVIDER_KEYS)
 from utils import (announce, api_key, append_line, collect, make_directories,
                    model_slug, outstanding, read_all, read_lines, read_table,
                    result_path, section, shape_of)
@@ -141,15 +142,28 @@ def run_generation(arguments):
 # two cannot drift apart, and ingest writes the same records live generation
 # does, so nothing downstream knows or cares which route a reply took.
 
-# Define function to name the file a batch is written to or read from
-def batch_path(model_id, suffix):
-    return RESULTS_DIR / f'batch-{model_slug(model_id)}-{suffix}.jsonl'
+# Define function to name the file a batch is written to or read from. Before a
+# job exists the file is named after the model; once the provider has given an
+# identifier it is renamed after that, matching the name the results come back
+# under, so the request and reply files for a job sit together.
+def batch_path(model_id, suffix, job_id=""):
+    stem = job_id if job_id else f"pending-{model_slug(model_id)}"
+    return BATCHES_DIR / f"{stem}_{suffix}.jsonl"
+
+
+# Define function to rename a written request file after the job it became
+def name_after_job(model_id, job_id):
+    pending = batch_path(model_id, "requests")
+    named = batch_path(model_id, "requests", job_id)
+    if pending.exists():
+        pending.replace(named)
+    return named
 
 
 # Define function to write the batch file to upload, skipping anything already
 # collected so that it composes with a run that stopped part way
 def write_batch(model, endpoint='/v1/responses', replicates=None, max_tokens=None,
-                temperature=None, limit=0):
+                temperature=None, limit=0, fresh=False):
     replicates = GENERATION['replicates'] if replicates is None else replicates
     max_tokens = GENERATION['max_tokens'] if max_tokens is None else max_tokens
     temperature = GENERATION['temperature'] if temperature is None else temperature
@@ -160,8 +174,11 @@ def write_batch(model, endpoint='/v1/responses', replicates=None, max_tokens=Non
                'backend': 'api', 'temperature': temperature}
               for prompt_id in prompts['prompt_id']
               for replicate in range(1, replicates + 1)]
-    pending = outstanding(wanted=wanted, keys=['prompt_id', 'replicate'],
-                          collected=read_lines(result_path(model, ADAPTATION_DIR)))
+    # a rerun asks the same prompts again, so what is already collected is not a
+    # reason to skip them
+    pending = wanted if fresh else outstanding(
+        wanted=wanted, keys=['prompt_id', 'replicate'],
+        collected=read_lines(result_path(model, ADAPTATION_DIR)))
     if limit:
         pending = pending[:limit]
     if not pending:
@@ -180,6 +197,23 @@ def write_batch(model, endpoint='/v1/responses', replicates=None, max_tokens=Non
     return path, len(pending)
 
 
+# Define function to move a model's collected replies out of the way before it
+# is run again. Ingest appends, so a rerun over an existing file would leave two
+# replies per prompt with no way to tell which request produced which. The old
+# pass is kept, out of the directory the pipeline reads, because it is evidence
+# of what the model did under the earlier conditions.
+def archive_replies(model):
+    current = result_path(model, ADAPTATION_DIR)
+    if not current.exists():
+        return None
+    stamp = datetime.now().strftime('%Y%m%d-%H%M')
+    archive = ADAPTATION_DIR.parent / 'archive'
+    archive.mkdir(parents=True, exist_ok=True)
+    moved = archive / f'{current.stem}.{stamp}.jsonl'
+    current.replace(moved)
+    return moved
+
+
 # Define function to read a finished batch into the results, writing the same
 # records live generation writes so that nothing downstream can tell them apart
 def read_batch(model, source, temperature=None):
@@ -190,12 +224,23 @@ def read_batch(model, source, temperature=None):
     provider = provider_of(model)
     path = result_path(model, ADAPTATION_DIR)
 
-    read, failed = 0, 0
+    # a second pass over the same prompts would write a second row for every
+    # replicate already present, and no later stage could tell the two apart,
+    # so anything already collected is skipped rather than duplicated
+    already = read_lines(path)
+    seen = set() if already.empty else {
+        (str(row['prompt_id']), str(row['replicate']))
+        for _, row in already.iterrows()}
+
+    read, failed, duplicate = 0, 0, 0
     for line in source.read_text().splitlines():
         if not line.strip():
             continue
         row = json.loads(line)
         prompt_id, _, replicate = row['custom_id'].rpartition('-r')
+        if (prompt_id, replicate) in seen:
+            duplicate += 1
+            continue
         response = row.get('response') or {}
         body = response.get('body') or {}
         error = ''
@@ -209,6 +254,9 @@ def read_batch(model, source, temperature=None):
                            'temperature': temperature, 'error': error,
                            'response': '' if error else read_reply(provider, body)})
         read += 1
+    if duplicate:
+        print(f'{duplicate:,} skipped, already collected for this model. Move '
+              f'{path.name} aside first if this is meant to replace it.')
     return read, failed
 
 
@@ -219,7 +267,7 @@ def run_export(arguments):
                               replicates=arguments.replicates,
                               max_tokens=arguments.max_tokens,
                               temperature=arguments.temperature,
-                              limit=arguments.limit)
+                              limit=arguments.limit, fresh=arguments.fresh)
     if path is None:
         raise SystemExit('nothing outstanding')
     print(f'{count:,} requests for {arguments.model} on '
@@ -421,6 +469,11 @@ if __name__ == '__main__':
                         help='the endpoint a batch job runs against')
     parser.add_argument('--file', default='',
                         help='the results file downloaded from the console')
+    parser.add_argument('--force', action='store_true',
+                        help='export the whole pass again, ignoring what is '
+                             'already collected')
+    parser.add_argument('--fresh', action='store_true',
+                        help='export every prompt again, ignoring what is collected')
     parser.add_argument('--prompt-id', default='', help='the prompt to trace')
     parser.add_argument('--reply', default='',
                         help='skip generation and score this text instead')

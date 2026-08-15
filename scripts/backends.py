@@ -25,7 +25,7 @@ import urllib.request
 os.environ.setdefault('HF_HUB_DISABLE_PROGRESS_BARS', '1')
 os.environ.setdefault('TRANSFORMERS_VERBOSITY', 'error')
 
-from settings import GENERATION, JUDGES, MODELS
+from settings import GENERATION, JUDGES, MODELS, SAFETY_IDENTIFIER
 from utils import api_key
 
 # Ollama serves an OpenAI-compatible endpoint on this machine
@@ -209,6 +209,11 @@ def build_payload(provider, model_id, messages, max_tokens, temperature):
         # writes anything
         if effort:
             payload['reasoning'] = {'effort': effort}
+        # attributes the request to the study rather than to the account, so
+        # that a benchmark of harmful prompts does not read as the account
+        # itself behaving badly
+        if SAFETY_IDENTIFIER:
+            payload['safety_identifier'] = SAFETY_IDENTIFIER
         return payload
     if provider == 'anthropic':
         payload = {'model': model_id, 'max_tokens': max_tokens,

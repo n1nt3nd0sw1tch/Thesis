@@ -32,6 +32,11 @@ ORIGINAL_DIR = SOURCES_DIR / 'original'
 DOWNLOADS_PATH = SOURCES_DIR / 'downloads.md'
 AOA_PATH = ORIGINAL_DIR / 'aoa.csv'
 
+# Batch jobs, one file of requests and one of replies per job, named by the job
+# identifier the provider gives back so that the two pair up and a set of
+# replies can be traced to the exact requests that produced it.
+BATCHES_DIR = DATA_DIR / 'batches'
+
 BENCHMARK_DIR = DATA_DIR / 'benchmark'
 DRAFTS_PATH = BENCHMARK_DIR / 'drafts.csv'
 BENCHMARK_PATH = BENCHMARK_DIR / 'benchmark.csv'
@@ -49,7 +54,7 @@ JUDGEMENTS_DIR = RESULTS_DIR / 'judgements'
 JUDGEMENTS_PATH = RESULTS_DIR / 'judgements.csv'
 DIALOGUES_PATH = PERSISTENCE_DIR / 'dialogues.csv'
 
-DATA_DIRS = [SOURCES_DIR, ORIGINAL_DIR, BENCHMARK_DIR, RESULTS_DIR,
+DATA_DIRS = [SOURCES_DIR, ORIGINAL_DIR, BENCHMARK_DIR, BATCHES_DIR, RESULTS_DIR,
              ADAPTATION_DIR, PERSISTENCE_DIR, JUDGEMENTS_DIR]
 
 # ----------------------------------------------------------------------------
@@ -82,6 +87,7 @@ SAFECHILD_COMMIT = SETTINGS['safechild_commit']
 
 GENERATION = SETTINGS['generation']
 PROVIDER_KEYS = SETTINGS['keys']
+SAFETY_IDENTIFIER = SETTINGS.get('safety_identifier', '')
 MODELS = SETTINGS['models']
 JUDGES = SETTINGS['judges']
 JUDGE = JUDGES['primary']

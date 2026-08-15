@@ -99,14 +99,17 @@ def read_all(directory):
 # Define function to read the api key a provider expects, from .env
 def api_key(provider):
     variable = PROVIDER_KEYS.get(provider)
-    if variable is None:
-        return ''
-    if variable not in os.environ and ENV_PATH.exists():
+    return environment(variable) if variable else ''
+
+
+# Define function to read one value from .env or the environment
+def environment(name):
+    if name not in os.environ and ENV_PATH.exists():
         for line in ENV_PATH.read_text().splitlines():
-            name, _, value = line.partition('=')
-            if name.strip() and not name.strip().startswith('#'):
-                os.environ.setdefault(name.strip(), value.strip())
-    return os.environ.get(variable, '')
+            key, _, value = line.partition('=')
+            if key.strip() and not key.strip().startswith('#'):
+                os.environ.setdefault(key.strip(), value.strip())
+    return os.environ.get(name, '')
 
 
 # ----------------------------------------------------------------------------

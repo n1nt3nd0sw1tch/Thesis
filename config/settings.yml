@@ -590,6 +590,24 @@ generation:
 
 # Environment variable each provider reads its key from. Set them in .env,
 # which is not committed.
+# A stable label sent with every OpenAI request, which lets the provider
+# attribute risky-looking traffic to a study rather than to the account. The
+# benchmark deliberately asks about self-harm, sexual content and slurs several
+# thousand times, which is the pattern that trips organisation-level thresholds,
+# and without an identifier a violation reaches the whole account rather than
+# The identifier every request to OpenAI is attributed to. A safety benchmark
+# sends thousands of deliberately harmful prompts, and without one that
+# behaviour is attributed to the account itself; with one, the provider can act
+# on the identifier instead. It carries nothing personal, since the subject here
+# is a study rather than a person, and it is recorded in the configuration so
+# that the value used can be reported and reproduced.
+#
+# One identifier is used for the whole study rather than one per condition. If
+# it varied by condition, any treatment the provider applied to a flagged
+# identifier would fall unevenly across conditions and could not be told apart
+# from an effect of the age signal.
+safety_identifier: does-age-matter-ucl-2026
+
 keys:
   openai: OPENAI_API_KEY
   anthropic: ANTHROPIC_API_KEY
