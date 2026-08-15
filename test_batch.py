@@ -25,15 +25,34 @@ import utils
 
 MODEL = sys.argv[1] if len(sys.argv) > 1 else 'gpt-5.6-luna'
 PROMPT_ID = sys.argv[2] if len(sys.argv) > 2 else ''
-WAIT = 900          # Seconds to wait before giving up on the job
-POLL = 15           # Seconds between checks
+WAIT = 1800         # Seconds to wait before giving up on the job
+POLL = 10           # Seconds before the first check
+BACKOFF = 1.5       # How much longer to wait before each check after that
+POLL_MAX = 120      # Longest gap between checks
+
+
+
+# Define function to wait for a job, checking less often as it goes on. Each
+# check is itself an api request and appears in the provider's usage, so a fixed
+# short interval turns a quiet ten minute wait into forty logged requests.
+def wait_for(describe, finished):
+    started, gap = time.time(), POLL
+    while time.time() - started < WAIT:
+        state = describe()
+        if finished(state):
+            return state, int(time.time() - started), True
+        print(f'  {state}, {int(time.time() - started)}s')
+        time.sleep(gap)
+        gap = min(gap * BACKOFF, POLL_MAX)
+    return describe(), int(time.time() - started), False
+
 
 # ----------------------------------------------------------------------------
 # The one request
 # ----------------------------------------------------------------------------
 
 provider = backends.provider_of(MODEL)
-if provider not in ('openai', 'anthropic'):
+if provider not in ('openai', 'anthropic', 'google'):
     raise SystemExit(f'{MODEL} is served by {provider}, which has no batch route '
                      f'here yet. Use run.py generate --backend api instead.')
 if not utils.api_key(provider):
@@ -49,9 +68,13 @@ custom_id = f'{row["prompt_id"]}-r1'
 
 path = settings.BATCHES_DIR / 'test_requests.jsonl'
 path.parent.mkdir(parents=True, exist_ok=True)
-line = ({'custom_id': custom_id, 'params': body} if provider == 'anthropic'
-        else {'custom_id': custom_id, 'method': 'POST', 'url': '/v1/responses',
-              'body': body})
+if provider == 'anthropic':
+    line = {'custom_id': custom_id, 'params': body}
+elif provider == 'google':
+    line = {'key': custom_id, 'request': body}
+else:
+    line = {'custom_id': custom_id, 'method': 'POST', 'url': '/v1/responses',
+            'body': body}
 path.write_text(json.dumps(line) + '\n')
 
 print(f'Model     {MODEL} on {provider}')
@@ -73,14 +96,12 @@ if provider == 'openai':
                                 completion_window='24h')
     print(f'\nSubmitted {job.id}')
 
-    started = time.time()
-    while time.time() - started < WAIT:
-        job = client.batches.retrieve(job.id)
-        if job.status in ('completed', 'failed', 'cancelled', 'expired'):
-            break
-        print(f'  {job.status}, {int(time.time() - started)}s')
-        time.sleep(POLL)
-    print(f'Finished  {job.status} after {int(time.time() - started)}s')
+    job_id = job.id
+    _, waited, _ = wait_for(
+        lambda: client.batches.retrieve(job_id).status,
+        lambda s: s in ('completed', 'failed', 'cancelled', 'expired'))
+    job = client.batches.retrieve(job_id)
+    print(f'Finished  {job.status} after {waited}s')
 
     if job.status != 'completed':
         if job.error_file_id:
@@ -102,21 +123,19 @@ if provider == 'openai':
                f'top_p {returned.get("top_p")}, '
                f'reasoning {(returned.get("reasoning") or {}).get("effort")}')
 
-else:
+elif provider == 'anthropic':
     from anthropic import Anthropic
 
     client = Anthropic(api_key=utils.api_key('anthropic'))
     job = client.messages.batches.create(requests=[line])
     print(f'\nSubmitted {job.id}')
 
-    started = time.time()
-    while time.time() - started < WAIT:
-        job = client.messages.batches.retrieve(job.id)
-        if job.processing_status == 'ended':
-            break
-        print(f'  {job.processing_status}, {int(time.time() - started)}s')
-        time.sleep(POLL)
-    print(f'Finished  {job.processing_status} after {int(time.time() - started)}s')
+    job_id = job.id
+    _, waited, _ = wait_for(
+        lambda: client.messages.batches.retrieve(job_id).processing_status,
+        lambda s: s == 'ended')
+    job = client.messages.batches.retrieve(job_id)
+    print(f'Finished  {job.processing_status} after {waited}s')
 
     if job.processing_status != 'ended':
         raise SystemExit(f'Job is still {job.processing_status} after {WAIT}s.')
@@ -133,6 +152,44 @@ else:
     cap_hit = returned.get('stop_reason') == 'max_tokens'
     decoded = (f'stop reason {returned.get("stop_reason")}, '
                f'thinking not requested')
+
+else:
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=utils.api_key('google'))
+    uploaded = client.files.upload(
+        file=str(path),
+        config=types.UploadFileConfig(display_name='test', mime_type='jsonl'))
+    job = client.batches.create(model=MODEL, src=uploaded.name,
+                                config={'display_name': 'one-request-test'})
+    print(f'\nSubmitted {job.name}')
+
+    job_name = job.name
+    _, waited, _ = wait_for(
+        lambda: client.batches.get(name=job_name).state.name,
+        lambda s: s in ('JOB_STATE_SUCCEEDED', 'JOB_STATE_FAILED',
+                        'JOB_STATE_CANCELLED', 'JOB_STATE_EXPIRED'))
+    job = client.batches.get(name=job_name)
+    print(f'Finished  {job.state.name} after {waited}s')
+
+    if job.state.name != 'JOB_STATE_SUCCEEDED':
+        raise SystemExit(f'Job ended as {job.state.name}: '
+                         f'{getattr(job, "error", "no detail given")}')
+
+    result = json.loads(client.files.download(file=job.dest.file_name)
+                        .decode().splitlines()[0])
+    if result.get('error'):
+        print(f'\nRejected\n{json.dumps(result["error"], indent=2)[:600]}')
+        raise SystemExit('The payload was rejected. Fix it before a full pass.')
+    returned = result['response']
+    usage = returned.get('usageMetadata', {})
+    sent = usage.get('promptTokenCount', 0)
+    reasoning = usage.get('thoughtsTokenCount', 0)
+    received = usage.get('candidatesTokenCount', 0) + reasoning
+    finish = (returned.get('candidates') or [{}])[0].get('finishReason', '')
+    cap_hit = str(finish).upper() == 'MAX_TOKENS'
+    decoded = f'finish reason {finish}, thinking billed as output'
 
 # ----------------------------------------------------------------------------
 # What it means for a full pass

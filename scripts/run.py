@@ -193,11 +193,17 @@ def write_batch(model, endpoint='/v1/responses', replicates=None, max_tokens=Non
             [{'role': 'user', 'content': by_id[item['prompt_id']]}],
             max_tokens, item['temperature'])
         custom_id = f'{item["prompt_id"]}-r{item["replicate"]}'
-        # OpenAI takes a file of addressed requests; Anthropic takes the
-        # parameters alone and is told the endpoint once, for the whole job
-        line = ({'custom_id': custom_id, 'params': body} if provider == 'anthropic'
-                else {'custom_id': custom_id, 'method': 'POST', 'url': endpoint,
-                      'body': body})
+        # Each provider names the parts differently. OpenAI takes a file of
+        # addressed requests, Anthropic the parameters alone with the endpoint
+        # fixed for the job, and Google a key beside a bare request, with the
+        # model named once when the job is created rather than per line.
+        if provider == 'anthropic':
+            line = {'custom_id': custom_id, 'params': body}
+        elif provider == 'google':
+            line = {'key': custom_id, 'request': body}
+        else:
+            line = {'custom_id': custom_id, 'method': 'POST', 'url': endpoint,
+                    'body': body}
         append_line(path, line)
     return path, len(pending)
 
@@ -236,18 +242,24 @@ def read_batch(model, source, temperature=None):
     seen = set() if collected.empty else {
         (str(row.prompt_id), str(row.replicate)) for row in collected.itertuples()}
 
-    read, failed, truncated, repeated = 0, 0, 0, 0
+    read, failed, truncated, repeated, blocked = 0, 0, 0, 0, 0
     for line in source.read_text().splitlines():
         if not line.strip():
             continue
         row = json.loads(line)
-        prompt_id, _, replicate = row['custom_id'].rpartition('-r')
+        # Google returns the identifier as key, the other two as custom_id
+        prompt_id, _, replicate = str(row.get('custom_id')
+                                      or row.get('key')).rpartition('-r')
         if (prompt_id, replicate) in seen:
             repeated += 1
             continue
 
         # Anthropic reports the outcome under result; OpenAI under response
-        if 'result' in row:
+        # with a status code; Google under response with an error beside it
+        if 'key' in row and 'result' not in row:
+            body = row.get('response') or {}
+            failure = row.get('error') or (None if body else row)
+        elif 'result' in row:
             outcome = row['result'] or {}
             body = outcome.get('message') or {}
             failure = None if outcome.get('type') == 'succeeded' else outcome
@@ -256,26 +268,42 @@ def read_batch(model, source, temperature=None):
             body = response.get('body') or {}
             failure = (row.get('error')
                        or (body if response.get('status_code', 200) != 200 else None))
+        # A prompt refused by the provider's own filter never reached the model,
+        # so there is no reply to score. It is recorded rather than dropped,
+        # because where a provider intervenes before generation is itself a
+        # result, and it is kept out of the error field so that a rerun does not
+        # keep resubmitting something that will be blocked again.
+        stopped = ((body.get('promptFeedback') or {}).get('blockReason')
+                   or (body.get('prompt_feedback') or {}).get('block_reason') or '')
         error = ''
         if failure:
             error = str(failure)[:200]
             failed += 1
+        elif stopped:
+            blocked += 1
         else:
             record_usage(provider, body)
             # a reply stopped by the token cap has a censored length rather than
             # a measured one, and Response Length is an outcome measure
+            # each provider says the cap was reached in its own words
+            reasons = [str(body.get('stop_reason') or ''),
+                       str(body.get('status') or ''),
+                       *(str(c.get('finishReason') or '')
+                         for c in body.get('candidates', []))]
             if (body.get('incomplete_details')
-                    or body.get('status') == 'incomplete'
-                    or body.get('stop_reason') == 'max_tokens'):
+                    or any(r.lower() in ('max_tokens', 'incomplete', 'length')
+                           for r in reasons)):
                 truncated += 1
 
         append_line(path, {'prompt_id': prompt_id, 'model': model,
                            'replicate': replicate, 'backend': 'batch',
                            'temperature': temperature, 'error': error,
-                           'response': '' if error else read_reply(provider, body)})
+                           'blocked': stopped,
+                           'response': '' if error or stopped
+                                       else read_reply(provider, body)})
         seen.add((prompt_id, replicate))
         read += 1
-    return read, failed, truncated, repeated
+    return read, failed, truncated, repeated, blocked
 
 
 # Define function to write the batch file from the command line
@@ -301,13 +329,16 @@ def run_export(arguments):
 # Define function to read a finished batch from the command line
 def run_ingest(arguments):
     section('Batch ingest')
-    read, failed, truncated, repeated = read_batch(
+    read, failed, truncated, repeated, blocked = read_batch(
         model=arguments.model, source=arguments.file,
         temperature=arguments.temperature)
     print(f'{read:,} replies read into '
           f'{result_path(arguments.model, ADAPTATION_DIR).name}, {failed} failed')
     if repeated:
         print(f'{repeated:,} already collected and skipped')
+    if blocked:
+        print(f'{blocked} prompts were refused by the provider before reaching '
+              f'the model, so they carry no reply')
     if truncated:
         print(f'{truncated} replies hit the {GENERATION["max_tokens"]} token cap, '
               f'so their length is censored rather than measured')

@@ -47,7 +47,9 @@ if not takes:
           f"provider's own decoding")
 check('reasoning left to the provider', 'reasoning' not in probe,
       probe.get('reasoning', 'no key sent'))
-cap = probe.get('max_output_tokens') or probe.get('max_tokens')
+# each provider names the cap differently, and Google nests it
+cap = (probe.get('max_output_tokens') or probe.get('max_tokens')
+       or (probe.get('generationConfig') or {}).get('maxOutputTokens'))
 check(f"cap is {settings.GENERATION['max_tokens']}",
       cap == settings.GENERATION['max_tokens'])
 

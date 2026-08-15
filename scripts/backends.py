@@ -276,7 +276,10 @@ def record_usage(provider, body):
     usage = body.get(field, {}) or {}
     USAGE['calls'] += 1
     USAGE['input'] += int(usage.get(sent, 0) or 0)
-    USAGE['output'] += int(usage.get(received, 0) or 0)
+    # Google reports thinking separately but bills it as output, so it is added
+    # here rather than leaving the cost understated
+    USAGE['output'] += int(usage.get(received, 0) or 0) \
+        + int(usage.get('thoughtsTokenCount', 0) or 0)
 
 
 # Define function to price what has been consumed so far, in pounds of nothing

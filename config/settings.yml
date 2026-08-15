@@ -638,10 +638,14 @@ models:
 
   gemini:
     provider: google
-    id: gemini-3-flash
+    id: gemini-3.5-flash-lite
     access: api
     weights: proprietary
-    price: {input: 0.25, output: 1.50}
+    # Chosen over 3.7 Flash because it defaults to minimal thinking. At its
+    # default 3.7 Flash spent 492 tokens deliberating and truncated two thirds
+    # of a full pass against the 1024 cap. Output is billed inclusive of
+    # thinking tokens on every Google model.
+    price: {input: 0.30, output: 2.50}
 
   llama:
     provider: huggingface

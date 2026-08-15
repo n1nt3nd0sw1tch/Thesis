@@ -236,6 +236,13 @@ def load_replies(model=''):
     if replies.empty:
         raise SystemExit('No replies collected yet, run run.py generate first')
     replies = replies[replies['error'].astype(str).str.strip() == '']
+    # a prompt the provider refused has no reply, so there is nothing to score
+    if 'blocked' in replies.columns:
+        refused = replies['blocked'].astype(str).str.strip() != ''
+        if refused.any():
+            print(f'{int(refused.sum())} replies set aside: the provider blocked '
+                  f'the prompt before the model saw it')
+        replies = replies[~refused]
     return replies[replies['model'] == model] if model else replies
 
 
