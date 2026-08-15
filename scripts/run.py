@@ -25,18 +25,23 @@ supplied text, which exercises the scoring path without loading a large model.
 """
 
 import argparse
+import json
 import textwrap
+from pathlib import Path
 
 import pandas as pd
 import requests
-from backends import BACKENDS, ask, generate
+import backends
+from backends import (BATCH_SIZE, BATCHED, BACKENDS, USAGE, ask, build_payload,
+                      generate, generate_many, provider_of, read_reply,
+                      record_usage, spent)
 from evaluate import (JUDGE_TEMPERATURE, JUDGE_TOKENS, OLLAMA_JUDGE, build_item,
                       build_policy, compare, describe, read)
 from settings import (ADAPTATION_DIR, BENCHMARK_PATH, GENERATION, JUDGE,
-                      MODELS, PROMPTS_PATH, PROVIDER_KEYS)
-from utils import (announce, api_key, collect, make_directories, outstanding,
-                   read_all, read_lines, read_table, result_path, section,
-                   shape_of)
+                      MODELS, PROMPTS_PATH, PROVIDER_KEYS, RESULTS_DIR)
+from utils import (announce, api_key, append_line, collect, make_directories,
+                   model_slug, outstanding, read_all, read_lines, read_table,
+                   result_path, section, shape_of)
 
 # ----------------------------------------------------------------------------
 # Settings
@@ -90,13 +95,133 @@ def run_generation(arguments):
                                 by_id[item['prompt_id']], arguments.max_tokens,
                                 item['temperature'])}
 
-    failures = collect(pending=pending, produce=produce, path=path)
+    def produce_batch(group):
+        replies = generate_many(
+            arguments.backend, arguments.model,
+            [[{'role': 'user', 'content': by_id[item['prompt_id']]}]
+             for item in group],
+            arguments.max_tokens, arguments.temperature)
+        return [{'response': reply} for reply in replies]
+
+    def meter():
+        return (backends.spent(arguments.model),
+                backends.USAGE['input'] + backends.USAGE['output'])
+
+    batched = arguments.backend in BATCHED
+    if batched:
+        print(f'{arguments.batch_size} conversations to the GPU at a time')
+    failures = collect(pending=pending, produce=produce, path=path,
+                       label=arguments.model,
+                       meter=meter if arguments.backend == 'api' else None,
+                       produce_batch=produce_batch if batched else None,
+                       batch_size=arguments.batch_size)
 
     section('Collected')
     everything = read_all(ADAPTATION_DIR)
     print(f'{shape_of(everything)} across {ADAPTATION_DIR.name}')
     print(everything.groupby('model').size().to_string())
+    spent = backends.spent(arguments.model)
+    if spent is not None:
+        usage = backends.USAGE
+        print(f'\n{usage["calls"]:,} api calls this pass, '
+              f'{usage["input"]:,} input and {usage["output"]:,} output tokens, '
+              f'${spent:.2f}')
     return failures
+
+
+
+# ----------------------------------------------------------------------------
+# The provider batch queues
+# ----------------------------------------------------------------------------
+
+# A batch job halves the price and runs asynchronously, so it is submitted from
+# the provider's console rather than driven from here. Two stages bracket it:
+# export writes the file to upload, ingest reads the file that comes back. The
+# body of each request is built by the same function the live path uses, so the
+# two cannot drift apart, and ingest writes the same records live generation
+# does, so nothing downstream knows or cares which route a reply took.
+
+# Define function to name the file a batch is written to or read from
+def batch_path(model_id, suffix):
+    return RESULTS_DIR / f'batch-{model_slug(model_id)}-{suffix}.jsonl'
+
+
+# Define function to write the batch file to upload
+def run_export(arguments):
+    section('Batch export')
+    prompts = read_table(PROMPTS_PATH)
+    provider = provider_of(arguments.model)
+    collected = read_lines(result_path(arguments.model, ADAPTATION_DIR))
+
+    wanted = [{'prompt_id': prompt_id, 'model': arguments.model,
+               'replicate': replicate, 'backend': 'api',
+               'temperature': arguments.temperature}
+              for prompt_id in prompts['prompt_id']
+              for replicate in range(1, arguments.replicates + 1)]
+    pending = outstanding(wanted=wanted, collected=collected,
+                          keys=['prompt_id', 'replicate'])
+    if arguments.limit:
+        pending = pending[:arguments.limit]
+    if not pending:
+        raise SystemExit('nothing outstanding')
+
+    by_id = dict(zip(prompts['prompt_id'], prompts['prompt']))
+    path = batch_path(arguments.model, 'requests')
+    path.unlink(missing_ok=True)
+    for item in pending:
+        body = build_payload(
+            provider, arguments.model,
+            [{'role': 'user', 'content': by_id[item['prompt_id']]}],
+            arguments.max_tokens, item['temperature'])
+        append_line(path, {'custom_id': f'{item["prompt_id"]}-r{item["replicate"]}',
+                           'method': 'POST', 'url': arguments.endpoint,
+                           'body': body})
+
+    print(f'{len(pending):,} requests for {arguments.model} on {provider}')
+    print(f'written to {path}')
+    print(f'\nUpload it in the provider console, endpoint {arguments.endpoint}, '
+          f'then when the job finishes:')
+    print(f'    python scripts/run.py ingest --model {arguments.model} '
+          f'--file <downloaded results>.jsonl')
+    return 0
+
+
+# Define function to read a finished batch back into the results
+def run_ingest(arguments):
+    section('Batch ingest')
+    source = Path(arguments.file)
+    if not source.exists():
+        raise SystemExit(f'{source} not found')
+    provider = provider_of(arguments.model)
+    path = result_path(arguments.model, ADAPTATION_DIR)
+
+    read, failed = 0, 0
+    for line in source.read_text().splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        prompt_id, _, replicate = row['custom_id'].rpartition('-r')
+        response = row.get('response') or {}
+        body = response.get('body') or {}
+        error = ''
+        if row.get('error') or response.get('status_code', 200) != 200:
+            error = str(row.get('error') or body)[:200]
+            failed += 1
+        else:
+            record_usage(provider, body)
+        append_line(path, {'prompt_id': prompt_id, 'model': arguments.model,
+                           'replicate': replicate, 'backend': 'batch',
+                           'temperature': arguments.temperature, 'error': error,
+                           'response': '' if error else read_reply(provider, body)})
+        read += 1
+
+    print(f'{read:,} replies read into {path.name}, {failed} failed')
+    cost = spent(arguments.model)
+    if cost is not None:
+        usage = USAGE
+        print(f'{usage["input"]:,} input and {usage["output"]:,} output tokens, '
+              f'${cost:,.2f} at the standard rate, ${cost / 2:,.2f} at the batch rate')
+    return 0
 
 
 # ----------------------------------------------------------------------------
@@ -257,7 +382,8 @@ def run_check(arguments):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('stage', choices=['check', 'generate'])
+    parser.add_argument('stage',
+                        choices=['check', 'generate', 'export', 'ingest'])
     parser.add_argument('--model', default='')
     parser.add_argument('--backend', default='ollama', choices=list(BACKENDS))
     parser.add_argument('--judge', default='')
@@ -267,6 +393,12 @@ if __name__ == '__main__':
                         default=GENERATION['temperature'])
     parser.add_argument('--limit', type=int, default=0,
                         help='stop after this many replies, to time a pass')
+    parser.add_argument('--batch-size', type=int, default=BATCH_SIZE,
+                        help='conversations handed to vLLM at once')
+    parser.add_argument('--endpoint', default='/v1/responses',
+                        help='the endpoint a batch job runs against')
+    parser.add_argument('--file', default='',
+                        help='the results file downloaded from the console')
     parser.add_argument('--prompt-id', default='', help='the prompt to trace')
     parser.add_argument('--reply', default='',
                         help='skip generation and score this text instead')
@@ -278,10 +410,14 @@ if __name__ == '__main__':
                            else JUDGE['id'])
 
     make_directories()
+    if arguments.stage in ('generate', 'export', 'ingest') and not arguments.model:
+        raise SystemExit(f'--model is needed to {arguments.stage}')
     if arguments.stage == 'generate':
-        if not arguments.model:
-            raise SystemExit('--model is needed to generate')
         failures = run_generation(arguments)
+    elif arguments.stage == 'export':
+        failures = run_export(arguments)
+    elif arguments.stage == 'ingest':
+        failures = run_ingest(arguments)
     else:
         failures = run_check(arguments)
 

@@ -226,22 +226,44 @@ def announce(path, wanted, pending, limit=0):
 
 # Define function to work through the outstanding items, appending as they
 # arrive, so that a run stopping part way loses nothing and resumes where it
-# left off
-def collect(pending, produce, path):
+# left off. A running cost is reported where the model is billed per token, so
+# that a pass can be stopped before it overruns a budget rather than after.
+#
+# Where the backend can take many conversations at once, produce_batch is given
+# and the items are handed over in groups. Results are still appended one line
+# at a time, so a run interrupted mid-group loses only that group.
+def collect(pending, produce, path, label='', meter=None, produce_batch=None,
+            batch_size=1):
     started, spoke, failures = time.time(), time.time(), 0
-    for index, item in enumerate(pending, start=1):
+    size = batch_size if produce_batch else 1
+    index = 0
+    for start in range(0, len(pending), size):
+        group = pending[start:start + size]
         try:
-            result, error = produce(item), ''
+            results = (produce_batch(group) if produce_batch
+                       else [produce(group[0])])
+            errors = [''] * len(group)
         except Exception as problem:
             # one failure should not end an overnight run, so it is recorded and
             # the pass continues; a rerun retries whatever failed
-            result, error = {}, f'{type(problem).__name__}: {problem}'
-            failures += 1
-        append_line(path, {**item, **result, 'error': error})
+            results = [{}] * len(group)
+            errors = [f'{type(problem).__name__}: {problem}'] * len(group)
+            failures += len(group)
+        for item, result, error in zip(group, results, errors):
+            append_line(path, {**item, **result, 'error': error})
+        index += len(group)
         if time.time() - spoke >= REPORT_EVERY or index == len(pending):
             spoke = time.time()
             rate = index / max(time.time() - started, 1)
-            print(f'  {index} of {len(pending)}, {rate * 3600:.0f} an hour, '
-                  f'{(len(pending) - index) / rate / 3600:.1f} hours left, '
-                  f'{failures} failed')
+            line = (f'  {label + "  " if label else ""}{index} of {len(pending)}, '
+                    f'{rate * 3600:.0f} an hour, '
+                    f'{(len(pending) - index) / rate / 3600:.1f} hours left, '
+                    f'{failures} failed')
+            if meter is not None:
+                spent, tokens = meter()
+                if spent is not None:
+                    projected = spent / index * len(pending)
+                    line += (f'\n     ${spent:,.4f} spent, ${projected:,.2f} '
+                             f'projected for this pass, {tokens:,} tokens')
+            print(line)
     return failures

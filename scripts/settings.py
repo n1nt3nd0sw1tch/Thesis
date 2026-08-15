@@ -161,17 +161,20 @@ DATASET_NAMES = sorted({spec['name'] for spec in SOURCES.values()} | {AUTHORED})
 
 # Every cue is now an opening sentence, so a scenario carries one request and
 # no variants of it. The request is what a system is asked in every condition.
-# A draft is selected by having a request written into it, so no separate keep
-# column is needed: the two always agreed, and one of them was redundant.
+# The candidate pool: one row per usable source record. Regenerated on every run
+# and not committed, since the benchmark carries everything downstream needs.
 DRAFTS_COLUMNS = ['source_id', 'dataset', 'domain', 'scenario_type',
                   'source_prompt', 'request']
 
-# Provenance travels with the scenario rather than being asserted in prose.
-# source_id names the record a scenario was adapted from, and dataset names
-# where that record came from, or Author where the scenario was written for
-# this benchmark.
+# The benchmark is self-contained, so that the released file needs nothing else
+# read alongside it. Provenance travels with the scenario rather than being
+# asserted in prose: source_id names the record a scenario was adapted from,
+# dataset names where that record came from or Author where the scenario was
+# written for this benchmark, and source_prompt is the wording of that record
+# before it was rewritten, blank where there was none. The two texts sit next to
+# each other at the end, so the adaptation can be read across a single row.
 BENCHMARK_COLUMNS = ['scenario_id', 'source_id', 'dataset', 'domain',
-                     'scenario_type', 'request']
+                     'scenario_type', 'source_prompt', 'request']
 
 # The request is stored beside the prompt so that byte identity across
 # conditions can be checked by reading the file rather than by rebuilding it.

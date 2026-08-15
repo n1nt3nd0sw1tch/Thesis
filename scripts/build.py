@@ -6,10 +6,10 @@
 The first stage takes the pipeline from the source records to the file a model
 is given, in three steps, each validated before the next reads it.
 
-    drafts.csv     one draft per usable source record, and the only file edited
-                   by hand. Work already in it is preserved on every run
-    benchmark.csv  the 120 scenario slots, filled from the drafts marked to keep,
-                   each carrying the source record it was adapted from
+    drafts.csv     the candidate pool, one row per usable source record.
+                   Regenerated on every run and not committed
+    benchmark.csv  the benchmark itself: 120 scenarios, each carrying the record
+                   it was adapted from and that record's original wording
     prompts.csv    every scenario expanded across the age conditions
 
 Every condition is an opening sentence followed by the request, and the request
@@ -18,10 +18,11 @@ sentence. That is checked by rebuilding each prompt from its opener and its
 request and requiring exact equality, rather than by testing that the prompt
 ends in the right words.
 
-The scenarios are specified in config/scenarios.yml. Where one derives from a
-source record it is written into that record's row, so the derivation is stored
-rather than asserted; where it does not, a row is added with the dataset left
-blank and the origin recorded as authored.
+The scenarios are specified in config/scenarios.yml, which is the only file
+edited by hand. Where one derives from a source record it is written into that
+record's row, so the derivation is stored rather than asserted and travels into
+the benchmark with the original wording beside it; where it does not, the
+dataset is recorded as Author.
 
 The second stage needs replies, so it is run after run.py rather than with the
 first. It replays each opening reply and presses on the same request.
@@ -58,9 +59,6 @@ KEYWORD_RULES = {
     'vio': r'\b(?:assassinat\w*|john f kennedy|shinzo abe)',
 }
 
-# The draft columns written by hand. All others are generated on every run.
-DRAFT_FIELDS = ['scenario_type', 'request']
-
 EXPECTED_PROMPTS = sum(TOTAL_SCENARIOS for _ in CONDITIONS)
 
 # ----------------------------------------------------------------------------
@@ -86,9 +84,6 @@ def check_scenarios(scenarios, types=TYPES):
 
 # Define function to write every scenario into the drafts
 def fill(drafts, scenarios):
-    # rows added on a previous run are dropped first, so running twice gives the
-    # same file as running once and a removed scenario leaves nothing behind
-    drafts = drafts[~drafts['source_id'].str.startswith('authored-')].copy()
     written_count, added = 0, []
     for domain, types in scenarios.items():
         number = 0
@@ -238,26 +233,6 @@ def build_drafts(sources):
     })[DRAFTS_COLUMNS]
 
 
-# Define function to carry over the drafts already written and marked
-def merge_drafts(drafts, drafts_path):
-    if not drafts_path.exists():
-        return drafts
-    previous = read_table(drafts_path)
-    if previous['source_id'].duplicated().any():
-        raise ValueError('drafts.csv contains duplicate source_id values')
-
-    authored = previous[~previous['source_id'].isin(drafts['source_id'])]
-    drafts = drafts.set_index('source_id')
-    written_before = previous.set_index('source_id')
-    for source_id in drafts.index.intersection(written_before.index):
-        for field in DRAFT_FIELDS:
-            value = written_before.at[source_id, field]
-            if str(value).strip():
-                drafts.at[source_id, field] = value
-    drafts = pd.concat([drafts.reset_index(), authored], ignore_index=True)
-    return drafts[DRAFTS_COLUMNS]
-
-
 # ----------------------------------------------------------------------------
 # Benchmark
 # ----------------------------------------------------------------------------
@@ -277,8 +252,8 @@ def build_benchmark(drafts, domains, types):
                     'dataset': draft['dataset'] if draft is not None else '',
                     'domain': name,
                     'scenario_type': scenario_type,
-                    'source_id': draft['source_id'] if draft is not None else '',
-                    'request': draft['request'] if draft is not None else '',
+                    **{column: draft[column] if draft is not None else ''
+                       for column in ['source_id', 'source_prompt', 'request']},
                 })
     return pd.DataFrame(rows)[BENCHMARK_COLUMNS]
 
@@ -511,7 +486,6 @@ def build_all():
     report(SCENARIOS_PATH.name, check_scenarios(SCENARIOS))
     DRAFTS_PATH.parent.mkdir(parents=True, exist_ok=True)
     drafts = build_drafts(sources=records)
-    drafts = merge_drafts(drafts=drafts, drafts_path=DRAFTS_PATH)
     # the scenarios are specified in config/scenarios.yml and written into the
     # pool here, so a revision there reaches the benchmark without any file
     # being edited by hand

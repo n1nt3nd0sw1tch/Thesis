@@ -1,23 +1,32 @@
 """Generates one reply from a model, through whichever runtime is available.
 
-Four are supported, and which one to use is a property of the machine rather
-than of the experiment. vLLM batches on a GPU and is what a full pass uses.
-Ollama serves a model locally and handles the quantisation the safeguard
-classifier ships in, so it is the way to run the real judge on a laptop. MLX is
-the fast option on Apple silicon. Transformers runs anywhere and is slowest.
+Which runtime to use is a property of the machine rather than of the experiment,
+except for api, which is a property of the model. vLLM batches on a GPU and is
+what a full pass over an open-weight model uses. Ollama serves a model locally
+and handles the quantisation the safeguard classifier ships in, so it is the way
+to run the real judge on a laptop. MLX is the fast option on Apple silicon.
+Transformers runs anywhere and is slowest. api reaches the proprietary systems,
+which cannot be run locally at all, and routes to the right provider by looking
+the model up in the panel.
 
-A model is loaded once and held, since loading dominates the cost of a short
-reply and a run puts thousands of prompts to the same model.
+A local model is loaded once and held, since loading dominates the cost of a
+short reply and a run puts thousands of prompts to the same model. An api call
+is retried with backoff, since rate limiting is the expected failure at volume
+and losing a reply to it would leave a gap that a rerun has to fill.
 """
 
 import json
 import os
+import random
+import time
+import urllib.error
 import urllib.request
 
 os.environ.setdefault('HF_HUB_DISABLE_PROGRESS_BARS', '1')
 os.environ.setdefault('TRANSFORMERS_VERBOSITY', 'error')
 
-from settings import GENERATION
+from settings import GENERATION, JUDGES, MODELS
+from utils import api_key
 
 # Ollama serves an OpenAI-compatible endpoint on this machine
 OLLAMA_URL = os.environ.get('OLLAMA_URL', 'http://localhost:11434')
@@ -25,6 +34,46 @@ OLLAMA_URL = os.environ.get('OLLAMA_URL', 'http://localhost:11434')
 # How long to wait for one reply, in seconds. A reasoning model thinks before it
 # answers, so this is generous.
 TIMEOUT = 600
+
+# How many times to retry an api call, and how long to wait first. Each attempt
+# waits twice as long as the last, with jitter so that concurrent runs do not
+# retry in step. Rate limiting is the expected failure at four thousand calls a
+# model, and it is temporary, so it is worth waiting out rather than recording.
+RETRIES = 5
+BACKOFF = 2.0
+RETRY_ON = {408, 409, 429, 500, 502, 503, 504}
+
+# What the run has consumed so far, updated by every api call and read by the
+# stage that is running. Kept here rather than returned, so that the backend
+# signature stays the same for a local model, which costs nothing.
+USAGE = {'calls': 0, 'input': 0, 'output': 0}
+
+# Where each provider reports what a call consumed
+USAGE_FIELDS = {
+    'openai': ('usage', 'input_tokens', 'output_tokens'),
+    'anthropic': ('usage', 'input_tokens', 'output_tokens'),
+    'google': ('usageMetadata', 'promptTokenCount', 'candidatesTokenCount'),
+}
+
+# Where each provider takes a conversation, and how it names the pieces. OpenAI
+# is reached through the Responses API rather than chat completions, because the
+# current models expose their reasoning effort only there.
+PROVIDERS = {
+    'openai': {
+        'url': 'https://api.openai.com/v1/responses',
+        'headers': lambda key: {'Authorization': f'Bearer {key}'},
+    },
+    'anthropic': {
+        'url': 'https://api.anthropic.com/v1/messages',
+        'headers': lambda key: {'x-api-key': key,
+                                'anthropic-version': '2023-06-01'},
+    },
+    'google': {
+        'url': 'https://generativelanguage.googleapis.com/v1beta/models/'
+               '{model}:generateContent',
+        'headers': lambda key: {'x-goog-api-key': key},
+    },
+}
 
 # ----------------------------------------------------------------------------
 # Backends
@@ -53,14 +102,23 @@ def generate_ollama(model_id, messages, max_tokens, temperature):
 
 # Define function to generate one reply with vLLM, which batches on a GPU
 def generate_vllm(model_id, messages, max_tokens, temperature, loaded={}):
+    return generate_vllm_batch(model_id, [messages], max_tokens, temperature)[0]
+
+
+# Define function to generate a reply to each of many conversations at once.
+# vLLM schedules them together and keeps the GPU fed, which is the whole reason
+# to ask for one: putting a single conversation at a time leaves it idle between
+# tokens and turns a night's work into a week's.
+def generate_vllm_batch(model_id, conversations, max_tokens, temperature,
+                        loaded={}):
     from vllm import LLM, SamplingParams
     if model_id not in loaded:
         loaded[model_id] = LLM(model=model_id, trust_remote_code=True,
                                dtype='bfloat16')
     sampling = SamplingParams(temperature=temperature,
                               top_p=GENERATION['top_p'], max_tokens=max_tokens)
-    output = loaded[model_id].chat(messages, sampling, use_tqdm=False)
-    return output[0].outputs[0].text.strip()
+    outputs = loaded[model_id].chat(list(conversations), sampling, use_tqdm=False)
+    return [output.outputs[0].text.strip() for output in outputs]
 
 
 # Define function to generate one reply with MLX on Apple silicon
@@ -106,8 +164,148 @@ def generate_transformers(model_id, messages, max_tokens, temperature, loaded={}
                             skip_special_tokens=True).strip()
 
 
-BACKENDS = {'ollama': generate_ollama, 'vllm': generate_vllm,
-            'mlx': generate_mlx, 'transformers': generate_transformers}
+# ----------------------------------------------------------------------------
+# The proprietary systems
+# ----------------------------------------------------------------------------
+
+# Define function to read one field of a model's entry in the panel
+def panel_entry(model_id, field, default=None):
+    for spec in list(MODELS.values()) + list(JUDGES.values()):
+        if spec['id'] == model_id:
+            return spec.get(field, default)
+    return default
+
+
+# Define function to read the reasoning effort a model should be run at
+def reasoning_of(model_id):
+    return panel_entry(model_id, 'reasoning', '')
+
+
+# Define function to find which provider serves a model, from the panel rather
+# than from the identifier, so that a renamed model needs no change here
+def provider_of(model_id):
+    for spec in list(MODELS.values()) + list(JUDGES.values()):
+        if spec['id'] == model_id:
+            return spec['provider']
+    raise ValueError(f'{model_id} is not in the panel, so its provider is '
+                     f'unknown. Add it to config/settings.yml under models.')
+
+
+# Define function to shape one conversation the way a provider expects it. All
+# three take the same messages and differ only in where a system turn goes and
+# what the fields are called.
+def build_payload(provider, model_id, messages, max_tokens, temperature):
+    system = ' '.join(m['content'] for m in messages if m['role'] == 'system')
+    turns = [m for m in messages if m['role'] != 'system']
+    effort = reasoning_of(model_id)
+    if provider == 'openai':
+        payload = {'model': model_id, 'max_output_tokens': max_tokens,
+                   'input': [{'role': m['role'], 'content': m['content']}
+                             for m in turns]}
+        if system:
+            payload['instructions'] = system
+        # reasoning tokens are billed as output and count against the cap, so a
+        # model left to think by default can spend the whole budget before it
+        # writes anything
+        if effort:
+            payload['reasoning'] = {'effort': effort}
+        return payload
+    if provider == 'anthropic':
+        payload = {'model': model_id, 'max_tokens': max_tokens,
+                   'temperature': temperature, 'top_p': GENERATION['top_p'],
+                   'messages': [{'role': m['role'], 'content': m['content']}
+                                for m in turns]}
+        if system:
+            payload['system'] = system
+        return payload
+    payload = {'contents': [{'role': 'user' if m['role'] == 'user' else 'model',
+                             'parts': [{'text': m['content']}]} for m in turns],
+               'generationConfig': {'maxOutputTokens': max_tokens,
+                                    'temperature': temperature,
+                                    'topP': GENERATION['top_p']}}
+    if system:
+        payload['systemInstruction'] = {'parts': [{'text': system}]}
+    return payload
+
+
+# Define function to read the reply out of whatever the provider returned
+def read_reply(provider, body):
+    if provider == 'openai':
+        if body.get('output_text'):
+            return str(body['output_text']).strip()
+        # a reasoning model returns its thinking as a separate block, so only
+        # the message blocks are read
+        parts = [content.get('text', '')
+                 for item in body.get('output', []) if item.get('type') == 'message'
+                 for content in item.get('content', [])
+                 if content.get('type') == 'output_text']
+        return ''.join(parts).strip()
+    if provider == 'anthropic':
+        return ''.join(block.get('text', '')
+                       for block in body.get('content', [])
+                       if block.get('type') == 'text').strip()
+    candidates = body.get('candidates', [])
+    if not candidates:
+        return ''
+    return ''.join(part.get('text', '') for part
+                   in candidates[0].get('content', {}).get('parts', [])).strip()
+
+
+# Define function to add what one call consumed to the running total
+def record_usage(provider, body):
+    field, sent, received = USAGE_FIELDS[provider]
+    usage = body.get(field, {}) or {}
+    USAGE['calls'] += 1
+    USAGE['input'] += int(usage.get(sent, 0) or 0)
+    USAGE['output'] += int(usage.get(received, 0) or 0)
+
+
+# Define function to price what has been consumed so far, in pounds of nothing
+# if the model is local and carries no rate in the panel
+def spent(model_id, usage=None):
+    price = panel_entry(model_id, 'price')
+    usage = USAGE if usage is None else usage
+    if not price:
+        return None
+    return (usage['input'] * price['input']
+            + usage['output'] * price['output']) / 1e6
+
+
+# Define function to generate one reply through a provider's api, retrying the
+# failures that pass on their own
+def generate_api(model_id, messages, max_tokens, temperature):
+    provider = provider_of(model_id)
+    spec = PROVIDERS[provider]
+    key = api_key(provider)
+    if not key:
+        raise SystemExit(f'no api key for {provider}. Put it in .env as '
+                         f'{provider.upper()}_API_KEY, which is not committed.')
+
+    payload = build_payload(provider, model_id, messages, max_tokens, temperature)
+    request = urllib.request.Request(
+        spec['url'].format(model=model_id), method='POST',
+        data=json.dumps(payload).encode(),
+        headers={'Content-Type': 'application/json', **spec['headers'](key)})
+
+    for attempt in range(RETRIES):
+        try:
+            with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+                body = json.loads(response.read())
+            record_usage(provider, body)
+            return read_reply(provider, body)
+        except urllib.error.HTTPError as problem:
+            detail = problem.read().decode('utf-8', 'replace')[:200]
+            if problem.code not in RETRY_ON or attempt == RETRIES - 1:
+                raise RuntimeError(f'{provider} returned {problem.code}: {detail}')
+        except urllib.error.URLError as problem:
+            if attempt == RETRIES - 1:
+                raise RuntimeError(f'{provider} unreachable: {problem.reason}')
+        time.sleep(BACKOFF * (2 ** attempt) * (0.5 + random.random()))
+
+
+BACKENDS = {'api': generate_api, 'ollama': generate_ollama,
+            'vllm': generate_vllm, 'mlx': generate_mlx,
+            'transformers': generate_transformers}
 
 
 # Define function to generate one reply through the chosen backend
@@ -124,3 +322,21 @@ def generate(backend, model_id, messages, max_tokens=None, temperature=None):
 def ask(backend, model_id, prompt, max_tokens=None, temperature=None):
     return generate(backend, model_id, [{'role': 'user', 'content': prompt}],
                     max_tokens, temperature)
+
+
+# Which backends can take many conversations at once, and how many to hand over
+# in one go. Only vLLM schedules them together; the rest are one at a time.
+BATCHED = {'vllm': generate_vllm_batch}
+BATCH_SIZE = 64
+
+
+# Define function to generate a reply to each of many conversations, through a
+# backend that can take them together
+def generate_many(backend, model_id, conversations, max_tokens=None,
+                  temperature=None):
+    if backend not in BATCHED:
+        raise ValueError(f'{backend} takes one conversation at a time')
+    return BATCHED[backend](
+        model_id, conversations,
+        GENERATION['max_tokens'] if max_tokens is None else max_tokens,
+        GENERATION['temperature'] if temperature is None else temperature)

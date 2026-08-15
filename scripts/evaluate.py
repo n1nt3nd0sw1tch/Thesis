@@ -26,7 +26,7 @@ import re
 
 import pandas as pd
 import textstat
-from backends import BACKENDS, generate
+from backends import BATCH_SIZE, BATCHED, BACKENDS, generate, generate_many
 from nltk import word_tokenize
 from settings import (ADAPTATION_DIR, ANSWERS, AOA_PATH, BENCHMARK_PATH, JUDGE,
                       JUDGEMENTS_DIR, JUDGEMENTS_PATH, JUDGEMENT_COLUMNS,
@@ -247,6 +247,11 @@ def judge_reply(judge, reply, request, expected, backend, norms):
                       [{'role': 'system', 'content': build_policy()},
                        {'role': 'user', 'content': build_item(request, reply)}],
                       max_tokens=JUDGE_TOKENS, temperature=JUDGE_TEMPERATURE)
+    return read_verdict(output, reply, expected, norms)
+
+
+# Define function to turn one classifier output into a scored row
+def read_verdict(output, reply, expected, norms):
     verdict, problems = read(output)
     verdict = verdict or {}
     return {**{measure_column(field): value for field, value in verdict.items()},
@@ -293,7 +298,26 @@ def run_judging(arguments):
                                expected=expected[item['prompt_id']],
                                backend=arguments.backend, norms=norms)
 
-        failures += collect(pending=pending, produce=produce, path=path)
+        def produce_batch(group, model=model):
+            outputs = generate_many(
+                arguments.backend, arguments.judge,
+                [[{'role': 'system', 'content': build_policy()},
+                  {'role': 'user',
+                   'content': build_item(
+                       requests[scenarios[item['prompt_id']]],
+                       texts[(item['prompt_id'], model, item['replicate'])])}]
+                 for item in group],
+                max_tokens=JUDGE_TOKENS, temperature=JUDGE_TEMPERATURE)
+            return [read_verdict(
+                output, texts[(item['prompt_id'], model, item['replicate'])],
+                expected[item['prompt_id']], norms)
+                for item, output in zip(group, outputs)]
+
+        failures += collect(pending=pending, produce=produce, path=path,
+                            label=model,
+                            produce_batch=(produce_batch
+                                           if arguments.backend in BATCHED else None),
+                            batch_size=arguments.batch_size)
 
     section('Judged')
     judgements = read_all(JUDGEMENTS_DIR)
@@ -323,6 +347,8 @@ if __name__ == '__main__':
     parser.add_argument('--judge', default='')
     parser.add_argument('--limit', type=int, default=0,
                         help='stop after this many replies, to time a pass')
+    parser.add_argument('--batch-size', type=int, default=BATCH_SIZE,
+                        help='replies handed to the classifier at once')
     parser.add_argument('--policy', action='store_true',
                         help='print the policy the classifier is given and stop')
     arguments = parser.parse_args()
