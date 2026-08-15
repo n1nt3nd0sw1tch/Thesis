@@ -176,6 +176,13 @@ def panel_entry(model_id, field, default=None):
     return default
 
 
+# Define function to say whether a model accepts the sampling parameters the
+# design asks for. Some reject them, and a request carrying one is refused
+# outright rather than ignored.
+def takes_sampling(model_id):
+    return str(panel_entry(model_id, 'sampling', '')).lower() != 'provider'
+
+
 # Define function to read the reasoning effort a model should be run at. An
 # absent setting, or the word default, sends nothing and leaves the provider to
 # decide, which is what a user of the deployed system receives.
@@ -202,15 +209,16 @@ def build_payload(provider, model_id, messages, max_tokens, temperature):
     turns = [m for m in messages if m['role'] != 'system']
     effort = reasoning_of(model_id)
     if provider == 'openai':
-        # Sampling is set explicitly rather than left to the provider, so that
-        # every model in the panel is decoded the same way. Left unset, this arm
-        # runs at the OpenAI defaults of temperature 1.0 and top_p 0.98 while
-        # the others run at what the design asks for, and the replicate
-        # agreement measure then compares models sampled differently.
+        # Sampling is sent where the model accepts it, so that as much of the
+        # panel as possible is decoded the same way. Where it is refused the
+        # model runs at the provider's own defaults, which is recorded in the
+        # panel rather than left to be inferred from a failed batch.
         payload = {'model': model_id, 'max_output_tokens': max_tokens,
-                   'temperature': temperature, 'top_p': GENERATION['top_p'],
                    'input': [{'role': m['role'], 'content': m['content']}
                              for m in turns]}
+        if takes_sampling(model_id):
+            payload['temperature'] = temperature
+            payload['top_p'] = GENERATION['top_p']
         if system:
             payload['instructions'] = system
         # reasoning tokens are billed as output and count against the cap, so a

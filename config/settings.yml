@@ -579,7 +579,11 @@ sources:
 # ----------------------------------------------------------------------------
 
 generation:
-  temperature: 0.7
+  # One is the decoding every provider in the panel defaults to, and the one
+  # model that refuses the parameter runs at it whatever is asked. Setting it
+  # here rather than relying on those defaults agreeing keeps the choice on
+  # record, and matches the deployed systems a user actually meets.
+  temperature: 1.0
   top_p: 1.0
   # A reply cut off part way would be scored as though it ended there, and the
   # measures would read a severed clause as the whole reply. A pilot at 512 cut
@@ -618,6 +622,11 @@ models:
     id: gpt-5.6-luna
     access: api
     weights: proprietary
+    # This model rejects temperature and top_p outright, so it runs at whatever
+    # the provider decodes at. Declared rather than discovered, because the
+    # replicate agreement measure compares models sampled the same way and this
+    # one cannot be.
+    sampling: provider
     price: {input: 0.20, output: 1.20}
 
   claude:

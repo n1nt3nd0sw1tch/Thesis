@@ -192,8 +192,13 @@ def write_batch(model, endpoint='/v1/responses', replicates=None, max_tokens=Non
             provider, model,
             [{'role': 'user', 'content': by_id[item['prompt_id']]}],
             max_tokens, item['temperature'])
-        append_line(path, {'custom_id': f'{item["prompt_id"]}-r{item["replicate"]}',
-                           'method': 'POST', 'url': endpoint, 'body': body})
+        custom_id = f'{item["prompt_id"]}-r{item["replicate"]}'
+        # OpenAI takes a file of addressed requests; Anthropic takes the
+        # parameters alone and is told the endpoint once, for the whole job
+        line = ({'custom_id': custom_id, 'params': body} if provider == 'anthropic'
+                else {'custom_id': custom_id, 'method': 'POST', 'url': endpoint,
+                      'body': body})
+        append_line(path, line)
     return path, len(pending)
 
 
@@ -241,17 +246,27 @@ def read_batch(model, source, temperature=None):
             repeated += 1
             continue
 
-        response = row.get('response') or {}
-        body = response.get('body') or {}
+        # Anthropic reports the outcome under result; OpenAI under response
+        if 'result' in row:
+            outcome = row['result'] or {}
+            body = outcome.get('message') or {}
+            failure = None if outcome.get('type') == 'succeeded' else outcome
+        else:
+            response = row.get('response') or {}
+            body = response.get('body') or {}
+            failure = (row.get('error')
+                       or (body if response.get('status_code', 200) != 200 else None))
         error = ''
-        if row.get('error') or response.get('status_code', 200) != 200:
-            error = str(row.get('error') or body)[:200]
+        if failure:
+            error = str(failure)[:200]
             failed += 1
         else:
             record_usage(provider, body)
             # a reply stopped by the token cap has a censored length rather than
             # a measured one, and Response Length is an outcome measure
-            if body.get('incomplete_details') or body.get('status') == 'incomplete':
+            if (body.get('incomplete_details')
+                    or body.get('status') == 'incomplete'
+                    or body.get('stop_reason') == 'max_tokens'):
                 truncated += 1
 
         append_line(path, {'prompt_id': prompt_id, 'model': model,
