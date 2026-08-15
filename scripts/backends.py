@@ -228,8 +228,10 @@ def build_payload(provider, model_id, messages, max_tokens, temperature):
             payload['reasoning'] = {'effort': effort}
         return payload
     if provider == 'anthropic':
+        # Anthropic asks that only one of temperature and top_p be set, so the
+        # one the design names is sent and the other left at its default
         payload = {'model': model_id, 'max_tokens': max_tokens,
-                   'temperature': temperature, 'top_p': GENERATION['top_p'],
+                   'temperature': temperature,
                    'messages': [{'role': m['role'], 'content': m['content']}
                                 for m in turns]}
         if system:

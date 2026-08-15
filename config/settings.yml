@@ -631,10 +631,10 @@ models:
 
   claude:
     provider: anthropic
-    id: claude-sonnet-5
+    id: claude-haiku-4-5-20251001
     access: api
     weights: proprietary
-    price: {input: 2.00, output: 10.00}
+    price: {input: 1.00, output: 5.00}
 
   gemini:
     provider: google
