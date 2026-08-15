@@ -12,9 +12,8 @@ import re
 import time
 
 import pandas as pd
-from scripts.settings import (BENCHMARK_COLUMNS, CUES, DATASET_NAMES, DATA_DIRS,
-                      DOMAIN_NAMES, DRAFTS_COLUMNS, ENV_PATH, KEEP_VALUES,
-                      PROVIDER_KEYS, TYPES, VARIANT_COLUMNS)
+from settings import (BENCHMARK_COLUMNS, DATASET_NAMES, DATA_DIRS, DOMAIN_NAMES,
+                      DRAFTS_COLUMNS, ENV_PATH, PROVIDER_KEYS, TYPES)
 
 # ----------------------------------------------------------------------------
 # Identifiers
@@ -177,25 +176,9 @@ def check_drafts(drafts):
                         text_columns=['source_id', 'domain'],
                         labels={'domain': DOMAIN_NAMES.values(),
                                 'dataset': DATASET_NAMES + [''],
-                                'implicit_cue': CUES + [''],
-                                'scenario_type': TYPES,
-                                'keep': KEEP_VALUES})
+                                'scenario_type': TYPES})
     if problems:
         return problems
-    kept = drafts[drafts['keep'] == 'yes']
-    blank = kept['request'].str.strip() == ''
-    if blank.any():
-        problems.append(f'{int(blank.sum())} kept drafts have no request')
-
-    # every kept scenario carries the cue variants. On age-sensitive scenarios
-    # they test whether a cue shifts the answer with the band; on harmful and
-    # benign ones, where the expected answer does not vary, they test whether
-    # the cue phrase shifts behaviour on its own, which is the control for the
-    # change in meaning the phrase also carries
-    for column in VARIANT_COLUMNS[1:]:
-        missing = kept[column].str.strip() == ''
-        if missing.any():
-            problems.append(f'{int(missing.sum())} kept drafts have no {column}')
     return problems
 
 
@@ -206,8 +189,7 @@ def check_benchmark(scenarios):
                     text_columns=['scenario_id', 'request'],
                     labels={'scenario_type': TYPES,
                             'domain': DOMAIN_NAMES.values(),
-                            'dataset': DATASET_NAMES + [''],
-                            'implicit_cue': CUES + ['']})
+                            'dataset': DATASET_NAMES + ['']})
 
 
 # ----------------------------------------------------------------------------

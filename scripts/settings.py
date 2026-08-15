@@ -36,7 +36,6 @@ BENCHMARK_DIR = DATA_DIR / 'benchmark'
 DRAFTS_PATH = BENCHMARK_DIR / 'drafts.csv'
 BENCHMARK_PATH = BENCHMARK_DIR / 'benchmark.csv'
 PROMPTS_PATH = BENCHMARK_DIR / 'prompts.csv'
-SCORES_PATH = BENCHMARK_DIR / 'scores.csv'
 
 # Everything a run produces, kept apart from the data because it grows with
 # every run while the benchmark stays fixed. One subfolder per experiment, named
@@ -96,6 +95,14 @@ WHO = SCENARIO_SETTINGS['who']
 
 AGE_BANDS = list(AGE_BAND_LIMITS)
 
+# The implicit arm marks minority rather than a band, because no English
+# education stage, workplace or peer group sits wholly inside 13 to 17. Minor
+# spans Child and Adolescent, so it carries an expected answer only where those
+# two agree, which the scenario types are built to ensure.
+MINOR = 'Minor'
+MINOR_BANDS = [band for band in AGE_BANDS if band != AGE_BANDS[-1]]
+BANDS = AGE_BANDS + [MINOR]
+
 
 # Define function to place an age in its band
 def band_for_age(age):
@@ -108,34 +115,25 @@ def band_for_age(age):
     raise ValueError(f'age {age} falls outside every band')
 
 
-# Define function to name the request variant a band uses. The canonical request
-# and one variant per band. Each variant carries an age cue in place of the
-# neutral phrase the canonical request holds. The wording runs source_prompt, as
-# the corpus had it, to request, as rewritten here, to prompt, as put to a model.
-def variant_column(band):
-    return f'implicit_{band.lower()}'
-
-
 # Define function to name a column after a measure
 def measure_column(name):
     return name.lower().replace(' ', '_')
 
 
-# Define function to fill in everything a condition implies from what it states.
-# An explicit condition states an age and the rest follows from it; an implicit
-# condition names a band and takes its request variant from that band and its
-# cue family from the scenario; the control states nothing.
+# Define function to fill in the one field a condition does not state. Every
+# other field is written out in config/settings.yml rather than inferred, so a
+# new kind of condition needs no change here.
 def expand_condition(condition):
     age = condition.get('age', '')
-    band = condition.get('band') or band_for_age(age)
-    signal = 'Explicit' if age else ('Implicit' if band else 'None')
+    opener = condition.get('opener')
+    if opener is None:
+        opener = EXPLICIT_OPENER.format(age=age) if age != '' else ''
     return {'name': condition['name'],
             'age': age,
-            'band': band,
-            'signal': signal,
-            'cue': {'Explicit': 'Age', 'Implicit': '', 'None': 'None'}[signal],
-            'variant': band if signal == 'Implicit' else '',
-            'opener': EXPLICIT_OPENER.format(age=age) if age else ''}
+            'band': condition.get('band', ''),
+            'signal': condition['signal'],
+            'cue': condition['cue'],
+            'opener': opener}
 
 
 CONDITIONS = [expand_condition(condition) for condition in SETTINGS['conditions']]
@@ -153,24 +151,33 @@ TYPE_ANSWERS = {name: values['answers'] for name, values in TYPES.items()}
 PER_DOMAIN = sum(values['count'] for values in TYPES.values())
 TOTAL_SCENARIOS = PER_DOMAIN * len(DOMAINS)
 
-DATASET_NAMES = sorted({spec['name'] for spec in SOURCES.values()})
-KEEP_VALUES = ['yes', '']
+# Where a scenario has no source record, the author is named in its place.
+AUTHORED = 'Author'
+DATASET_NAMES = sorted({spec['name'] for spec in SOURCES.values()} | {AUTHORED})
 
 # ----------------------------------------------------------------------------
 # What each file carries
 # ----------------------------------------------------------------------------
 
-VARIANT_COLUMNS = (['request', 'implicit_cue']
-                   + [variant_column(band) for band in AGE_BANDS])
-
+# Every cue is now an opening sentence, so a scenario carries one request and
+# no variants of it. The request is what a system is asked in every condition.
+# A draft is selected by having a request written into it, so no separate keep
+# column is needed: the two always agreed, and one of them was redundant.
 DRAFTS_COLUMNS = ['source_id', 'dataset', 'domain', 'scenario_type',
-                  'source_prompt', *VARIANT_COLUMNS, 'keep']
-BENCHMARK_COLUMNS = ['scenario_id', 'dataset', 'domain', 'scenario_type',
-                     *VARIANT_COLUMNS]
+                  'source_prompt', 'request']
+
+# Provenance travels with the scenario rather than being asserted in prose.
+# source_id names the record a scenario was adapted from, and dataset names
+# where that record came from, or Author where the scenario was written for
+# this benchmark.
+BENCHMARK_COLUMNS = ['scenario_id', 'source_id', 'dataset', 'domain',
+                     'scenario_type', 'request']
+
+# The request is stored beside the prompt so that byte identity across
+# conditions can be checked by reading the file rather than by rebuilding it.
 PROMPT_COLUMNS = ['prompt_id', 'scenario_id', 'condition', 'age', 'band',
-                  'signal', 'cue', 'prompt', 'expected_answer']
-SCORE_COLUMNS = ['variant', 'scenario_id', 'words', 'fkgl', 'fre', 'mean_aoa',
-                 'max_aoa', 'difficult', 'covered']
+                  'signal', 'cue', 'opener', 'request', 'prompt',
+                  'expected_answer']
 
 # One record per reply. The identifying fields come first so that scanning the
 # file shows what each line is without reading the reply itself, and the reply
@@ -198,16 +205,23 @@ DIALOGUE_COLUMNS = ['dialogue_id', 'prompt_id', 'scenario_id', 'condition',
 
 assert all(condition['band'] == band_for_age(condition['age'])
            for condition in CONDITIONS if condition['age'] != '')
+assert all(condition['band'] in BANDS + [''] for condition in CONDITIONS)
+assert all(condition['cue'] in CUES for condition in CONDITIONS)
+assert all(condition['signal'] in ('Explicit', 'Implicit', 'None')
+           for condition in CONDITIONS)
 assert len(set(CONDITION_NAMES)) == len(CONDITIONS)
-assert set(AGE_BANDS) >= {condition['band'] for condition in CONDITIONS
-                          if condition['band']}
-assert all(len(answers) == len(AGE_BANDS) for answers in TYPE_ANSWERS.values())
+assert set(BANDS) >= {condition['band'] for condition in CONDITIONS
+                      if condition['band']}
+assert all(set(answers) == set(AGE_BANDS) for answers in TYPE_ANSWERS.values()
+           if answers)
 assert all(answer in ANSWERS for answers in TYPE_ANSWERS.values()
-           for answer in answers)
-assert all([ANSWERS.index(answer) for answer in answers]
-           == sorted(ANSWERS.index(answer) for answer in answers)
-           for answers in TYPE_ANSWERS.values())
-assert len({tuple(answers) for answers in TYPE_ANSWERS.values()}) == len(TYPES)
+           for answer in answers.values())
+assert all([ANSWERS.index(answers[band]) for band in AGE_BANDS]
+           == sorted(ANSWERS.index(answer) for answer in answers.values())
+           for answers in TYPE_ANSWERS.values() if answers)
+assert len({tuple(answers[band] for band in AGE_BANDS)
+            for answers in TYPE_ANSWERS.values() if answers}) \
+    == len([answers for answers in TYPE_ANSWERS.values() if answers])
 assert all({'kind', 'name', 'licence'} <= set(spec) for spec in DATASETS.values())
 assert all({'file', 'name', 'scenario_type', 'text', 'label', 'domains'}
            <= set(spec) for spec in SOURCES.values())

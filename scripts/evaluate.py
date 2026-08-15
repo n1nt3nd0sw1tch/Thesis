@@ -28,7 +28,7 @@ import pandas as pd
 import textstat
 from backends import BACKENDS, generate
 from nltk import word_tokenize
-from scripts.settings import (ADAPTATION_DIR, ANSWERS, AOA_PATH, BENCHMARK_PATH, JUDGE,
+from settings import (ADAPTATION_DIR, ANSWERS, AOA_PATH, BENCHMARK_PATH, JUDGE,
                       JUDGEMENTS_DIR, JUDGEMENTS_PATH, JUDGEMENT_COLUMNS,
                       LANGUAGE, PROMPTS_PATH, SAFETY, measure_column)
 from utils import (announce, collect, make_directories, outstanding, read_all,

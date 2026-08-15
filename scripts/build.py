@@ -4,23 +4,24 @@
     python scripts/build.py turns      the persistence dialogues, once replies exist
 
 The first stage takes the pipeline from the source records to the file a model
-is given, in four steps, each validated before the next reads it.
+is given, in three steps, each validated before the next reads it.
 
     drafts.csv     one draft per usable source record, and the only file edited
                    by hand. Work already in it is preserved on every run
-    benchmark.csv  the 120 scenario slots, filled from the drafts marked to keep
-    prompts.csv    every scenario expanded across the eleven age conditions
-    scores.csv     the readability of each request variant, which is the check
-                   that a variant differs from the canonical request in its cue
+    benchmark.csv  the 120 scenario slots, filled from the drafts marked to keep,
+                   each carrying the source record it was adapted from
+    prompts.csv    every scenario expanded across the age conditions
 
-The scenarios themselves are specified in config/scenarios.yml as a base and a
-cue clause. The base is the canonical request and the clause is appended to make
-each variant, so a variant is the control plus one phrase and the four texts of
-a scenario differ in exactly one contiguous span. Building them here rather than
-editing four columns by hand is what keeps that property true after a revision.
-Where a scenario derives from a source record it is written into that record's
-row, so the derivation is stored rather than asserted; where it does not, a row
-is added with the dataset left blank.
+Every condition is an opening sentence followed by the request, and the request
+is the same text in all of them, so a prompt is the control plus at most one
+sentence. That is checked by rebuilding each prompt from its opener and its
+request and requiring exact equality, rather than by testing that the prompt
+ends in the right words.
+
+The scenarios are specified in config/scenarios.yml. Where one derives from a
+source record it is written into that record's row, so the derivation is stored
+rather than asserted; where it does not, a row is added with the dataset left
+blank and the origin recorded as authored.
 
 The second stage needs replies, so it is run after run.py rather than with the
 first. It replays each opening reply and presses on the same request.
@@ -29,20 +30,17 @@ first. It replays each opening reply and presses on the same request.
 import argparse
 
 import pandas as pd
-from evaluate import load_aoa, score_frame
-from scripts.settings import (ADAPTATION_DIR, AGE_BANDS, ANSWERS, BENCHMARK_COLUMNS,
+from settings import (ADAPTATION_DIR, ANSWERS, BANDS, BENCHMARK_COLUMNS,
                       BENCHMARK_PATH, CONDITION_AGES, CONDITION_NAMES,
                       CONDITIONS, CUES, DIALOGUES_PATH, DIALOGUE_COLUMNS,
                       DOMAIN_CODES, DOMAIN_NAMES, DRAFTS_COLUMNS, DRAFTS_PATH,
-                      METHODS, ORIGINAL_DIR, PER_DOMAIN, PERSISTENCE,
-                      PROMPTS_PATH, PROMPT_COLUMNS, SCENARIOS, SCENARIOS_PATH,
-                      SCORES_PATH, SCORE_COLUMNS, SEED, SIGNALS, SOURCES,
-                      TOTAL_SCENARIOS, TYPES, TYPE_ANSWERS, VARIANT_COLUMNS,
-                      WHO, variant_column)
+                      METHODS, AUTHORED, MINOR, MINOR_BANDS, ORIGINAL_DIR, PERSISTENCE, PROMPTS_PATH, PROMPT_COLUMNS, SCENARIOS,
+                      SCENARIOS_PATH, SEED, SIGNALS, SOURCES, TOTAL_SCENARIOS,
+                      TYPES, TYPE_ANSWERS)
 from utils import (check_benchmark, check_drafts, code_from_scenario,
                    make_prompt, make_prompt_id, make_scenario_id,
                    make_source_id, read_all, read_table, report, section,
-                   shape_of, validate, written)
+                   validate, written)
 
 # ----------------------------------------------------------------------------
 # Settings
@@ -61,20 +59,13 @@ KEYWORD_RULES = {
 }
 
 # The draft columns written by hand. All others are generated on every run.
-DRAFT_FIELDS = ['scenario_type', *VARIANT_COLUMNS, 'keep']
+DRAFT_FIELDS = ['scenario_type', 'request']
 
-EXPECTED_PROMPTS = TOTAL_SCENARIOS * len(CONDITIONS)
+EXPECTED_PROMPTS = sum(TOTAL_SCENARIOS for _ in CONDITIONS)
 
 # ----------------------------------------------------------------------------
 # Scenarios
 # ----------------------------------------------------------------------------
-
-# Define function to build the four texts of one scenario from its base
-def build_texts(base, clause):
-    return {'request': f'{base}?',
-            **{column: f'{base} {clause.format(who=who)}?'
-               for column, who in WHO.items()}}
-
 
 # Define function to check the scenarios cover every slot exactly
 def check_scenarios(scenarios, types=TYPES):
@@ -104,11 +95,10 @@ def fill(drafts, scenarios):
         for scenario_type, entries in types.items():
             for entry in entries:
                 source_id = '' if entry['source'] == 'authored' else entry['source']
-                base, clause = entry['base'], entry['cue']
+                base = entry['base']
                 number += 1
                 values = {'domain': domain, 'scenario_type': scenario_type,
-                          'implicit_cue': 'People', 'keep': 'yes',
-                          **build_texts(base, clause)}
+                          'request': f'{base}?'}
                 rows = (drafts.index[drafts['source_id'] == source_id]
                         if source_id else [])
                 if len(rows):
@@ -118,7 +108,8 @@ def fill(drafts, scenarios):
                 else:
                     code = DOMAIN_CODES[domain]
                     added.append({'source_id': f'authored-{code}-{number}',
-                                  'dataset': '', 'source_prompt': '', **values})
+                                  'dataset': AUTHORED, 'source_prompt': '',
+                                  **values})
     filled = pd.concat([drafts, pd.DataFrame(added)], ignore_index=True)
     return filled[DRAFTS_COLUMNS], written_count, len(added)
 
@@ -229,21 +220,6 @@ def build_sources(sources, original_dir):
     return records
 
 
-# Define function to report how many source records each domain has
-def report_coverage(sources, per_domain):
-    counts = sources['domain_code'].value_counts()
-    coverage = pd.DataFrame({
-        'domain': list(DOMAIN_NAMES.values()),
-        'available': [int(counts.get(code, 0)) for code in DOMAIN_NAMES],
-    })
-    coverage['to_author'] = (per_domain - coverage['available']).clip(lower=0)
-    short = coverage[coverage['to_author'] > 0]
-    if not short.empty:
-        print(f'{int(short["to_author"].sum())} scenarios to write without a '
-              f'source record:')
-        print(short.to_string(index=False))
-
-
 # ----------------------------------------------------------------------------
 # Drafts
 # ----------------------------------------------------------------------------
@@ -258,15 +234,14 @@ def build_drafts(sources):
         'scenario_type': sources['dataset'].map(
             {name: spec['scenario_type'] for name, spec in SOURCES.items()}),
         'source_prompt': sources['source_prompt'],
-        **{column: '' for column in VARIANT_COLUMNS},
-        'keep': '',
+        'request': '',
     })[DRAFTS_COLUMNS]
 
 
 # Define function to carry over the drafts already written and marked
 def merge_drafts(drafts, drafts_path):
     if not drafts_path.exists():
-        return drafts, 0
+        return drafts
     previous = read_table(drafts_path)
     if previous['source_id'].duplicated().any():
         raise ValueError('drafts.csv contains duplicate source_id values')
@@ -274,15 +249,13 @@ def merge_drafts(drafts, drafts_path):
     authored = previous[~previous['source_id'].isin(drafts['source_id'])]
     drafts = drafts.set_index('source_id')
     written_before = previous.set_index('source_id')
-    kept = 0
     for source_id in drafts.index.intersection(written_before.index):
         for field in DRAFT_FIELDS:
             value = written_before.at[source_id, field]
             if str(value).strip():
                 drafts.at[source_id, field] = value
-                kept += 1
     drafts = pd.concat([drafts.reset_index(), authored], ignore_index=True)
-    return drafts[DRAFTS_COLUMNS], kept
+    return drafts[DRAFTS_COLUMNS]
 
 
 # ----------------------------------------------------------------------------
@@ -291,7 +264,7 @@ def merge_drafts(drafts, drafts_path):
 
 # Define function to fill the scenario slots from the drafts marked to keep
 def build_benchmark(drafts, domains, types):
-    kept = drafts[drafts['keep'].str.strip().str.lower() == 'yes']
+    kept = drafts[drafts['request'].str.strip() != '']
     rows = []
     for code, name in domains.items():
         for scenario_type, values in types.items():
@@ -304,66 +277,57 @@ def build_benchmark(drafts, domains, types):
                     'dataset': draft['dataset'] if draft is not None else '',
                     'domain': name,
                     'scenario_type': scenario_type,
-                    **{column: draft[column] if draft is not None else ''
-                       for column in VARIANT_COLUMNS},
+                    'source_id': draft['source_id'] if draft is not None else '',
+                    'request': draft['request'] if draft is not None else '',
                 })
     return pd.DataFrame(rows)[BENCHMARK_COLUMNS]
-
-
-# Define function to report where too few or too many drafts have been kept
-def report_selection(drafts, domains, types):
-    kept = drafts[drafts['keep'].str.strip().str.lower() == 'yes']
-    counts = kept.groupby(['domain', 'scenario_type']).size()
-    selection = pd.DataFrame(
-        [[int(counts.get((name, scenario_type), 0)) - values['count']
-          for scenario_type, values in types.items()] for name in domains.values()],
-        index=list(domains.values()), columns=list(types)).rename_axis('domain')
-    section('Slots')
-    print(selection.to_string())
-    short = int(selection.clip(upper=0).abs().to_numpy().sum())
-    spare = int(selection.clip(lower=0).to_numpy().sum())
-    print(f'{short} slots short, {spare} kept drafts unused')
-
-
-# Define function to report how the cue families are spread across the drafts kept
-def report_cues(drafts):
-    kept = drafts[(drafts['keep'].str.strip().str.lower() == 'yes')
-                  & (drafts['implicit_cue'].str.strip() != '')]
-    if kept.empty:
-        return
-    section('Cue families across the drafts kept')
-    print(pd.crosstab(kept['domain'], kept['implicit_cue'],
-                      margins=True, margins_name='total').to_string())
 
 
 # ----------------------------------------------------------------------------
 # Prompts
 # ----------------------------------------------------------------------------
 
-# Define function to pick the request a condition asks for
-def request_for(scenario, condition):
-    column = (variant_column(condition['variant']) if condition['variant']
-              else 'request')
-    return scenario[column].strip()
+# Define function to give the answer expected of one scenario type at one band.
+# A type may carry no expectation at all, in which case none of its scenarios is
+# compared against one. Minor spans Child and Adolescent, so it carries an
+# expectation only where the two agree. The control and the neutral opener name no band at all, and carry
+# one only where the type expects the same answer whatever the age: a request
+# that is harmful at every age is still expected to be refused when no age is
+# given. Where the answer depends on the band, they have none, because there is
+# nothing to compare against.
+def expected_answer(scenario_type, band):
+    answers = TYPE_ANSWERS[scenario_type]
+    if not answers:
+        return ''
+    if band == MINOR:
+        given = {answers[b] for b in MINOR_BANDS}
+        return given.pop() if len(given) == 1 else ''
+    if band:
+        return answers[band]
+    given = set(answers.values())
+    return given.pop() if len(given) == 1 else ''
 
 
-# Define function to build the prompt one condition contributes, if it has one
+# Define function to build the prompt one condition contributes. Every prompt is
+# the opener followed by the request, and the request is the same text in every
+# condition, so the opener is the only thing that differs from the control.
 def build_prompt(scenario, condition):
-    request = request_for(scenario, condition)
+    request = scenario['request'].strip()
     if not request:
         return None
-    band = condition['band']
     return {
         'prompt_id': make_prompt_id(scenario['scenario_id'], condition['name']),
         'scenario_id': scenario['scenario_id'],
         'condition': condition['name'],
         'age': condition['age'],
-        'band': band,
+        'band': condition['band'],
         'signal': condition['signal'],
-        'cue': condition['cue'] or scenario['implicit_cue'],
+        'cue': condition['cue'],
+        'opener': condition['opener'],
+        'request': request,
         'prompt': make_prompt(condition['opener'], request),
-        'expected_answer': TYPE_ANSWERS[scenario['scenario_type']][
-            AGE_BANDS.index(band)] if band else '',
+        'expected_answer': expected_answer(scenario['scenario_type'],
+                                           condition['band']),
     }
 
 
@@ -374,67 +338,44 @@ def build_prompts(scenarios, conditions):
     return pd.DataFrame([row for row in rows if row])[PROMPT_COLUMNS]
 
 
-# Define function to check that every prompt ends in the request it asked for
-def check_matching(prompts, scenarios):
-    by_condition = {condition['name']: condition for condition in CONDITIONS}
-    indexed = scenarios.set_index('scenario_id')
-    unmatched = [row.prompt_id for row in prompts.itertuples()
-                 if not row.prompt.endswith(
-                     request_for(indexed.loc[row.scenario_id],
-                                 by_condition[row.condition]))]
-    if unmatched:
-        return [f'{len(unmatched)} prompts do not end in the request their '
-                f'condition asked for, first {unmatched[0]}']
+# Define function to check that every prompt is exactly its opener followed by
+# its request. Testing only that a prompt ends in its request would pass one
+# whose opener had drifted, so the whole string is rebuilt and compared.
+def check_identity(prompts):
+    wrong = [row.prompt_id for row in prompts.itertuples()
+             if row.prompt != make_prompt(row.opener, row.request)]
+    if wrong:
+        return [f'{len(wrong)} prompts are not their opener followed by their '
+                f'request, first {wrong[0]}']
+    varying = prompts.groupby('scenario_id')['request'].nunique()
+    drifted = varying[varying > 1]
+    if len(drifted):
+        return [f'{len(drifted)} scenarios carry more than one request across '
+                f'their conditions, first {drifted.index[0]}']
     return []
 
 
 # Define function to check the expanded prompt file
-def check_prompts(prompts, scenarios):
+def check_prompts(prompts):
     problems = validate(frame=prompts, required=PROMPT_COLUMNS,
                         id_column='prompt_id',
-                        text_columns=['prompt_id', 'scenario_id', 'prompt'],
+                        text_columns=['prompt_id', 'scenario_id', 'prompt',
+                                      'request'],
                         labels={'condition': CONDITION_NAMES, 'signal': SIGNALS,
-                                'cue': CUES, 'band': AGE_BANDS + [''],
+                                'cue': CUES, 'band': BANDS + [''],
                                 'age': CONDITION_AGES,
                                 'expected_answer': ANSWERS + ['']})
-    return problems + check_matching(prompts=prompts, scenarios=scenarios)
+    return problems + check_identity(prompts)
 
 
 # Define function to report what the prompt file contains
 def report_prompts(prompts):
-    signals = prompts.groupby('signal').size()
-    print(f'{len(prompts)} prompts, ' + ', '.join(
-        f'{count} {signal.lower()}' for signal, count in signals.items()))
-    if len(prompts) != EXPECTED_PROMPTS:
-        print(f'Expected: {EXPECTED_PROMPTS} prompts once every scenario is written')
-
-
-# ----------------------------------------------------------------------------
-# Request scores
-# ----------------------------------------------------------------------------
-
-# Define function to score the canonical request and every cue variant
-def score_variants(benchmark, norms):
-    frames = [score_frame(benchmark, 'canonical', norms)]
-    for band in AGE_BANDS:
-        column = variant_column(band)
-        variants = benchmark[benchmark[column].str.strip() != '']
-        if not variants.empty:
-            frames.append(score_frame(variants, column, norms, column=column))
-    return pd.concat(frames, ignore_index=True)[SCORE_COLUMNS]
-
-
-# Define function to compare the variants on every measure
-def report_comparison(scores):
-    measures = ['words', 'fkgl', 'fre', 'mean_aoa', 'max_aoa', 'difficult',
-                'covered']
-    section('Mean score per variant')
-    print(scores.groupby('variant')[measures].mean().round(2).to_string())
-
-
-# ----------------------------------------------------------------------------
-# Run
-# ----------------------------------------------------------------------------
+    counts = prompts.groupby('signal').size()
+    signals = ', '.join(f'{counts.get(name, 0)} {name.lower()}'
+                        for name in ['Explicit', 'Implicit', 'None'])
+    print(f'{len(prompts)} prompts, {prompts["scenario_id"].nunique()} scenarios '
+          f'by {len(CONDITIONS)} conditions')
+    print(f'{signals.replace("none", "without a signal")}')
 
 
 # ----------------------------------------------------------------------------
@@ -525,7 +466,7 @@ def check_dialogues(dialogues, methods):
     problems = validate(frame=dialogues, required=DIALOGUE_COLUMNS,
                         text_columns=['dialogue_id', 'prompt_id', 'scenario_id'],
                         labels={'role': ['user', 'assistant'],
-                                'band': AGE_BANDS + [''],
+                                'band': BANDS + [''],
                                 'method': list(METHODS),
                                 'expected_answer': ANSWERS + ['']})
     turns = 2 + 2 * len(METHODS[methods[0]]['turns'])
@@ -565,54 +506,40 @@ def report_dialogues(dialogues, methods, scenarios):
 def build_all():
     section('Source records')
     records = build_sources(sources=SOURCES, original_dir=ORIGINAL_DIR)
-    report_coverage(sources=records, per_domain=PER_DOMAIN)
 
     section('Scenarios')
     report(SCENARIOS_PATH.name, check_scenarios(SCENARIOS))
-
     DRAFTS_PATH.parent.mkdir(parents=True, exist_ok=True)
     drafts = build_drafts(sources=records)
-    drafts, _ = merge_drafts(drafts=drafts, drafts_path=DRAFTS_PATH)
+    drafts = merge_drafts(drafts=drafts, drafts_path=DRAFTS_PATH)
     # the scenarios are specified in config/scenarios.yml and written into the
     # pool here, so a revision there reaches the benchmark without any file
     # being edited by hand
-    drafts, sourced, authored = fill(drafts=drafts, scenarios=SCENARIOS)
-    print(f'{sourced + authored} scenarios written, {sourced} into a source '
-          f'record and {authored} without one')
+    drafts, adapted, authored = fill(drafts=drafts, scenarios=SCENARIOS)
+    print(f'{adapted + authored} written, {adapted} adapted from a source '
+          f'record and {authored} authored')
 
-    section('Scenario drafts')
+    section('Drafts')
     drafts.to_csv(DRAFTS_PATH, index=False)
-    written_count = int((drafts['request'].str.strip() != '').sum())
-    marked = int(drafts['keep'].str.strip().str.lower().eq('yes').sum())
-    print(f'{len(drafts)} drafts, {written_count} requests written, '
-          f'{marked} kept')
     report('drafts.csv', check_drafts(drafts))
-
-    report_selection(drafts=drafts, domains=DOMAIN_NAMES, types=TYPES)
-    report_cues(drafts=drafts)
+    print(f'{len(drafts)} drafts, {int((drafts["request"].str.strip() != "").sum())} '
+          f'carrying a request')
 
     section('Benchmark')
     benchmark = build_benchmark(drafts=drafts, domains=DOMAIN_NAMES, types=TYPES)
     benchmark.to_csv(BENCHMARK_PATH, index=False)
     filled = written(benchmark)
-    print(f'{len(benchmark)} scenarios, {len(filled)} filled')
-    report('benchmark.csv', check_benchmark(filled))
     if filled.empty:
         raise SystemExit('No scenarios written yet, nothing further to build.')
+    report('benchmark.csv', check_benchmark(filled))
+    print(f'{len(filled)} scenarios across {filled["domain"].nunique()} categories '
+          f'and {filled["scenario_type"].nunique()} types')
 
-    section('Model prompts')
+    section('Prompts')
     prompts = build_prompts(scenarios=filled, conditions=CONDITIONS)
-    report('prompts.csv', check_prompts(prompts=prompts, scenarios=filled))
+    report('prompts.csv', check_prompts(prompts))
     prompts.to_csv(PROMPTS_PATH, index=False)
     report_prompts(prompts=prompts)
-
-    section('Request scores')
-    scores = score_variants(benchmark=filled, norms=load_aoa())
-    print(f'Scores: {shape_of(scores)}')
-    report('scores.csv', validate(frame=scores, required=SCORE_COLUMNS,
-                                  text_columns=['variant', 'scenario_id']))
-    scores.to_csv(SCORES_PATH, index=False)
-    report_comparison(scores=scores)
 
 
 # Define function to build the replayed dialogues of the persistence extension
