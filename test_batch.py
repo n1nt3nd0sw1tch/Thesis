@@ -1,7 +1,8 @@
-"""Puts one prompt through the whole batch route, end to end.
+"""Puts one prompt through the whole route a model uses, end to end.
 
     python test_batch.py                                  gpt-5.6-luna
     python test_batch.py claude-haiku-4-5-20251001
+    python test_batch.py deepseek-v4-flash                live, no batch queue
     python test_batch.py gpt-5.6-luna bod-a3-age09        a chosen prompt
 
 Run it from the repository root. It writes a one line request file, submits it,
@@ -52,9 +53,9 @@ def wait_for(describe, finished):
 # ----------------------------------------------------------------------------
 
 provider = backends.provider_of(MODEL)
-if provider not in ('openai', 'anthropic', 'google'):
-    raise SystemExit(f'{MODEL} is served by {provider}, which has no batch route '
-                     f'here yet. Use run.py generate --backend api instead.')
+if provider not in ('openai', 'anthropic', 'google', 'deepseek'):
+    raise SystemExit(f'{MODEL} is served by {provider}, which this script does '
+                     f'not cover. Use run.py generate --backend api instead.')
 if not utils.api_key(provider):
     raise SystemExit(f'No api key for {provider}. Put it in .env as '
                      f'{settings.PROVIDER_KEYS[provider]}.')
@@ -68,7 +69,9 @@ custom_id = f'{row["prompt_id"]}-r1'
 
 path = settings.BATCHES_DIR / 'test_requests.jsonl'
 path.parent.mkdir(parents=True, exist_ok=True)
-if provider == 'anthropic':
+if provider == 'deepseek':
+    line = {'custom_id': custom_id, 'body': body}
+elif provider == 'anthropic':
     line = {'custom_id': custom_id, 'params': body}
 elif provider == 'google':
     line = {'key': custom_id, 'request': body}
@@ -86,7 +89,26 @@ print(f'Payload   {json.dumps(body)}')
 # Submit, wait, and read the one result back
 # ----------------------------------------------------------------------------
 
-if provider == 'openai':
+if provider == 'deepseek':
+    # No batch queue here, so the one request goes straight out. The point of
+    # the test is the same: prove the payload is accepted and measure what a
+    # reply costs before committing to four thousand of them.
+    print('\nNo batch queue for this provider, sending live')
+    reply = backends.generate_api(MODEL, [{'role': 'user', 'content': row['prompt']}],
+                                  settings.GENERATION['max_tokens'],
+                                  settings.GENERATION['temperature'])
+    sent, received = backends.USAGE['input'], backends.USAGE['output']
+    reasoning = backends.LAST_REASONING
+    cap_hit = backends.LAST_FINISH == 'length'
+    # report what was sent, not what the design asked for: a model that refuses
+    # sampling parameters decodes at its own settings whatever the config says
+    decoded = (f'temperature {body["temperature"]}, top_p {body["top_p"]}'
+               if 'temperature' in body
+               else 'provider defaults, this model does not accept temperature '
+                    'or top_p')
+    returned = None
+
+elif provider == 'openai':
     from openai import OpenAI
 
     client = OpenAI(api_key=utils.api_key('openai'))
@@ -198,7 +220,7 @@ else:
 price = backends.panel_entry(MODEL, 'price') or {}
 cost = (sent * price.get('input', 0) + received * price.get('output', 0)) / 1e6
 
-print(f'\nReply\n{backends.read_reply(provider, returned)}')
+print(f'\nReply\n{reply if returned is None else backends.read_reply(provider, returned)}')
 print(f'\nTokens    {sent} in, {received} out'
       + (f', {reasoning} of them reasoning' if reasoning else ''))
 print(f'Cap       {settings.GENERATION["max_tokens"]}, '

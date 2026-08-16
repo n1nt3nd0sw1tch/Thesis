@@ -191,7 +191,7 @@ PROMPT_COLUMNS = ['prompt_id', 'scenario_id', 'condition', 'age', 'band',
 # file shows what each line is without reading the reply itself, and the reply
 # comes last because it is the only field of unpredictable length.
 RESPONSE_COLUMNS = ['prompt_id', 'model', 'replicate', 'backend', 'temperature',
-                    'error', 'blocked', 'response']
+                    'error', 'blocked', 'truncated', 'response']
 
 # One row per scored reply: what the model did with the request, the five safety
 # measures, and the language measures computed from the text.

@@ -324,7 +324,8 @@ def run_judging(arguments):
                             label=model,
                             produce_batch=(produce_batch
                                            if arguments.backend in BATCHED else None),
-                            batch_size=arguments.batch_size)
+                            batch_size=arguments.batch_size,
+                            workers=arguments.workers)
 
     section('Judged')
     judgements = read_all(JUDGEMENTS_DIR)
@@ -356,6 +357,8 @@ if __name__ == '__main__':
                         help='stop after this many replies, to time a pass')
     parser.add_argument('--batch-size', type=int, default=BATCH_SIZE,
                         help='replies handed to the classifier at once')
+    parser.add_argument('--workers', type=int, default=1,
+                        help='calls in flight at once, for an api classifier')
     parser.add_argument('--policy', action='store_true',
                         help='print the policy the classifier is given and stop')
     arguments = parser.parse_args()

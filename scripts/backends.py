@@ -19,6 +19,7 @@ import json
 import os
 import random
 import time
+from threading import Lock
 import urllib.error
 import urllib.request
 
@@ -48,11 +49,21 @@ RETRY_ON = {408, 409, 429, 500, 502, 503, 504}
 # signature stays the same for a local model, which costs nothing.
 USAGE = {'calls': 0, 'input': 0, 'output': 0}
 
+# The last call's reasoning tokens and stop reason. A live run has no result
+# file to read them back from, and both decide whether a pass is usable.
+LAST_REASONING = 0
+LAST_FINISH = ''
+
+# Concurrent workers all report into the same totals, and += on a dict value is
+# a read and a write rather than one step, so without this the counts drift.
+_COUNTING = Lock()
+
 # Where each provider reports what a call consumed
 USAGE_FIELDS = {
     'openai': ('usage', 'input_tokens', 'output_tokens'),
     'anthropic': ('usage', 'input_tokens', 'output_tokens'),
     'google': ('usageMetadata', 'promptTokenCount', 'candidatesTokenCount'),
+    'deepseek': ('usage', 'prompt_tokens', 'completion_tokens'),
 }
 
 # Where each provider takes a conversation, and how it names the pieces. OpenAI
@@ -72,6 +83,12 @@ PROVIDERS = {
         'url': 'https://generativelanguage.googleapis.com/v1beta/models/'
                '{model}:generateContent',
         'headers': lambda key: {'x-goog-api-key': key},
+    },
+    # DeepSeek serves the OpenAI chat completions dialect at its own host, and
+    # has no batch queue, so this model is generated live rather than submitted
+    'deepseek': {
+        'url': 'https://api.deepseek.com/chat/completions',
+        'headers': lambda key: {'Authorization': f'Bearer {key}'},
     },
 }
 
@@ -227,6 +244,16 @@ def build_payload(provider, model_id, messages, max_tokens, temperature):
         if effort:
             payload['reasoning'] = {'effort': effort}
         return payload
+    if provider == 'deepseek':
+        payload = {'model': model_id, 'max_tokens': max_tokens,
+                   'messages': [{'role': m['role'], 'content': m['content']}
+                                for m in messages]}
+        # In thinking mode these are accepted and ignored, so sending them would
+        # put a decoding in the request that the model never applies
+        if takes_sampling(model_id):
+            payload['temperature'] = temperature
+            payload['top_p'] = GENERATION['top_p']
+        return payload
     if provider == 'anthropic':
         # Anthropic asks that only one of temperature and top_p be set, so the
         # one the design names is sent and the other left at its default
@@ -249,6 +276,10 @@ def build_payload(provider, model_id, messages, max_tokens, temperature):
 
 # Define function to read the reply out of whatever the provider returned
 def read_reply(provider, body):
+    if provider == 'deepseek':
+        choices = body.get('choices') or []
+        return (choices[0].get('message', {}).get('content') or '').strip() \
+            if choices else ''
     if provider == 'openai':
         if body.get('output_text'):
             return str(body['output_text']).strip()
@@ -266,20 +297,33 @@ def read_reply(provider, body):
     candidates = body.get('candidates', [])
     if not candidates:
         return ''
+    # a thought arrives as a part flagged thought, beside the answer parts, so
+    # taking every part would fold the thinking into the text that gets scored
     return ''.join(part.get('text', '') for part
-                   in candidates[0].get('content', {}).get('parts', [])).strip()
+                   in candidates[0].get('content', {}).get('parts', [])
+                   if not part.get('thought')).strip()
 
 
 # Define function to add what one call consumed to the running total
 def record_usage(provider, body):
+    global LAST_REASONING, LAST_FINISH
     field, sent, received = USAGE_FIELDS[provider]
     usage = body.get(field, {}) or {}
-    USAGE['calls'] += 1
-    USAGE['input'] += int(usage.get(sent, 0) or 0)
-    # Google reports thinking separately but bills it as output, so it is added
-    # here rather than leaving the cost understated
-    USAGE['output'] += int(usage.get(received, 0) or 0) \
-        + int(usage.get('thoughtsTokenCount', 0) or 0)
+    LAST_REASONING = int((usage.get('completion_tokens_details') or {})
+                         .get('reasoning_tokens', 0)
+                         or (usage.get('output_tokens_details') or {})
+                         .get('reasoning_tokens', 0)
+                         or usage.get('thoughtsTokenCount', 0) or 0)
+    LAST_FINISH = str(next((c.get('finish_reason') or c.get('finishReason') or ''
+                            for c in (body.get('choices')
+                                      or body.get('candidates') or [])), ''))
+    with _COUNTING:
+        USAGE['calls'] += 1
+        USAGE['input'] += int(usage.get(sent, 0) or 0)
+        # Google reports thinking separately but bills it as output, so it is
+        # added here rather than leaving the cost understated
+        USAGE['output'] += int(usage.get(received, 0) or 0) \
+            + int(usage.get('thoughtsTokenCount', 0) or 0)
 
 
 # Define function to price what has been consumed so far, in pounds of nothing
@@ -293,9 +337,10 @@ def spent(model_id, usage=None):
             + usage['output'] * price['output']) / 1e6
 
 
-# Define function to generate one reply through a provider's api, retrying the
-# failures that pass on their own
-def generate_api(model_id, messages, max_tokens, temperature):
+# Define function to generate one reply through a provider's api, returning the
+# whole body rather than the text. A live run records what a batch job would
+# have returned, so that the two routes leave the same evidence behind.
+def call_api(model_id, messages, max_tokens, temperature):
     provider = provider_of(model_id)
     spec = PROVIDERS[provider]
     key = api_key(provider)
@@ -314,7 +359,7 @@ def generate_api(model_id, messages, max_tokens, temperature):
             with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
                 body = json.loads(response.read())
             record_usage(provider, body)
-            return read_reply(provider, body)
+            return body
         except urllib.error.HTTPError as problem:
             detail = problem.read().decode('utf-8', 'replace')[:200]
             if problem.code not in RETRY_ON or attempt == RETRIES - 1:
@@ -323,6 +368,12 @@ def generate_api(model_id, messages, max_tokens, temperature):
             if attempt == RETRIES - 1:
                 raise RuntimeError(f'{provider} unreachable: {problem.reason}')
         time.sleep(BACKOFF * (2 ** attempt) * (0.5 + random.random()))
+
+
+# Define function to generate one reply through a provider's api
+def generate_api(model_id, messages, max_tokens, temperature):
+    return read_reply(provider_of(model_id),
+                      call_api(model_id, messages, max_tokens, temperature))
 
 
 BACKENDS = {'api': generate_api, 'ollama': generate_ollama,

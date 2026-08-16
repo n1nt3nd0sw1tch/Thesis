@@ -615,6 +615,7 @@ keys:
   openai: OPENAI_API_KEY
   anthropic: ANTHROPIC_API_KEY
   google: GOOGLE_API_KEY
+  deepseek: DEEPSEEK_API_KEY
 
 models:
   gpt:
@@ -641,11 +642,29 @@ models:
     id: gemini-3.5-flash-lite
     access: api
     weights: proprietary
-    # Chosen over 3.7 Flash because it defaults to minimal thinking. At its
-    # default 3.7 Flash spent 492 tokens deliberating and truncated two thirds
-    # of a full pass against the 1024 cap. Output is billed inclusive of
+    # Chosen over 3.7 Flash on measured behaviour rather than on the tier's
+    # reputation for minimal thinking, which did not hold: it spent 426 thinking
+    # tokens on a 20 token prompt. What decided it is that a full pass came in
+    # at 407 output tokens a reply with 73 of 4,320 truncated, where 3.7 Flash
+    # ran two thirds of a pass into the 1024 cap. Output is billed inclusive of
     # thinking tokens on every Google model.
     price: {input: 0.30, output: 2.50}
+
+  deepseek_api:
+    provider: deepseek
+    id: deepseek-v4-flash
+    access: api
+    weights: proprietary
+    # No batch endpoint, so this model is generated live rather than queued.
+    # Thinking is enabled by default at effort high, the highest default in the
+    # panel, and in thinking mode the api documents that temperature and top_p
+    # are accepted without error and have no effect. Declared here so that the
+    # request stops claiming a decoding the model does not apply.
+    sampling: provider
+    # Rates are the pre-16 August ones; DeepSeek moves to peak and off-peak
+    # pricing at 16:00 UTC on 16 August 2026, and every published new rate is
+    # above the rate here.
+    price: {input: 0.14, output: 0.28}
 
   llama:
     provider: huggingface

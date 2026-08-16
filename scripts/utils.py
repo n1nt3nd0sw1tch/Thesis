@@ -10,6 +10,8 @@ import json
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 
 import pandas as pd
 from settings import (BENCHMARK_COLUMNS, DATASET_NAMES, DATA_DIRS, DOMAIN_NAMES,
@@ -82,11 +84,20 @@ def read_lines(path):
     return pd.DataFrame(rows)
 
 
+# Held while a line is written. Once calls run several at a time, two workers can
+# reach this at once, and a reply of several kilobytes is past the size at which
+# an append arrives whole. Without this, two half records interleave into one
+# line that no later stage can parse.
+_APPENDING = Lock()
+
+
 # Define function to append one record to a JSON lines file
 def append_line(path, record):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open('a') as file:
-        file.write(json.dumps(record) + '\n')
+    line = json.dumps(record) + '\n'
+    with _APPENDING:
+        with path.open('a') as file:
+            file.write(line)
 
 
 # Define function to read every model's output in one directory as one frame
@@ -203,6 +214,13 @@ def check_benchmark(scenarios):
 # thousands of lines and bury the failures worth seeing.
 REPORT_EVERY = 60
 
+# How many api calls to have in flight at once. A live pass spends nearly all of
+# its time waiting on a reply rather than sending one, so sending several at
+# once costs nothing extra and finishes in a fraction of the time. Kept modest,
+# because a provider that rate limits will refuse the surplus rather than queue
+# it, and the retry that follows wastes more than the concurrency gained.
+WORKERS = 12
+
 # Define function to list the items of one file still to collect. An item is
 # identified by its keys alone, and a row already written for those keys is not
 # repeated unless it failed in transit.
@@ -232,41 +250,72 @@ def announce(path, wanted, pending, limit=0):
 # left off. A running cost is reported where the model is billed per token, so
 # that a pass can be stopped before it overruns a budget rather than after.
 #
-# Where the backend can take many conversations at once, produce_batch is given
-# and the items are handed over in groups. Results are still appended one line
-# at a time, so a run interrupted mid-group loses only that group.
+# Three ways of getting through the list, and which one applies is a property of
+# the backend. produce_batch hands a group to a runtime that schedules them
+# together, which is what vLLM is for. workers above one puts them to an api
+# concurrently, which is worth it when each call spends its time waiting rather
+# than computing. Otherwise one at a time.
+#
+# Results are appended as they finish, so with workers the file order is the
+# order they came back rather than the order asked. Nothing reads that order:
+# every record carries its own prompt and replicate, and resume matches on those.
 def collect(pending, produce, path, label='', meter=None, produce_batch=None,
-            batch_size=1):
+            batch_size=1, workers=1):
     started, spoke, failures = time.time(), time.time(), 0
     size = batch_size if produce_batch else 1
     index = 0
-    for start in range(0, len(pending), size):
-        group = pending[start:start + size]
+
+    def attempt(item):
         try:
-            results = (produce_batch(group) if produce_batch
-                       else [produce(group[0])])
-            errors = [''] * len(group)
+            return produce(item), ''
         except Exception as problem:
             # one failure should not end an overnight run, so it is recorded and
             # the pass continues; a rerun retries whatever failed
-            results = [{}] * len(group)
-            errors = [f'{type(problem).__name__}: {problem}'] * len(group)
-            failures += len(group)
-        for item, result, error in zip(group, results, errors):
-            append_line(path, {**item, **result, 'error': error})
-        index += len(group)
-        if time.time() - spoke >= REPORT_EVERY or index == len(pending):
-            spoke = time.time()
-            rate = index / max(time.time() - started, 1)
-            line = (f'  {label + "  " if label else ""}{index} of {len(pending)}, '
-                    f'{rate * 3600:.0f} an hour, '
-                    f'{(len(pending) - index) / rate / 3600:.1f} hours left, '
-                    f'{failures} failed')
-            if meter is not None:
-                spent, tokens = meter()
-                if spent is not None:
-                    projected = spent / index * len(pending)
-                    line += (f'\n     ${spent:,.4f} spent, ${projected:,.2f} '
-                             f'projected for this pass, {tokens:,} tokens')
-            print(line)
+            return {}, f'{type(problem).__name__}: {problem}'
+
+    pool = ThreadPoolExecutor(max_workers=workers) if workers > 1 else None
+    try:
+        for start in range(0, len(pending), max(size, workers if pool else 1)):
+            group = pending[start:start + max(size, workers if pool else 1)]
+            if produce_batch:
+                try:
+                    results = produce_batch(group)
+                    errors = [''] * len(group)
+                except Exception as problem:
+                    results = [{}] * len(group)
+                    errors = [f'{type(problem).__name__}: {problem}'] * len(group)
+                    failures += len(group)
+            elif pool:
+                # each call is independent, so they are sent together and written
+                # in the order they were asked for rather than the order they land
+                outcomes = list(pool.map(attempt, group))
+                results = [result for result, _ in outcomes]
+                errors = [error for _, error in outcomes]
+                failures += sum(1 for error in errors if error)
+            else:
+                result, error = attempt(group[0])
+                results, errors = [result], [error]
+                failures += 1 if error else 0
+
+            for item, result, error in zip(group, results, errors):
+                append_line(path, {**item, **result, 'error': error})
+            index += len(group)
+
+            if time.time() - spoke >= REPORT_EVERY or index == len(pending):
+                spoke = time.time()
+                rate = index / max(time.time() - started, 1)
+                line = (f'  {label + "  " if label else ""}{index} of {len(pending)}, '
+                        f'{rate * 3600:.0f} an hour, '
+                        f'{(len(pending) - index) / rate / 3600:.1f} hours left, '
+                        f'{failures} failed')
+                if meter is not None:
+                    spent, tokens = meter()
+                    if spent is not None:
+                        projected = spent / index * len(pending)
+                        line += (f'\n     ${spent:,.4f} spent, ${projected:,.2f} '
+                                 f'projected for this pass, {tokens:,} tokens')
+                print(line)
+    finally:
+        if pool:
+            pool.shutdown()
     return failures

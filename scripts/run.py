@@ -34,15 +34,17 @@ import pandas as pd
 import requests
 import backends
 from backends import (BATCH_SIZE, BATCHED, BACKENDS, USAGE, ask, build_payload,
+                      call_api,
                       generate, generate_many, provider_of, read_reply,
                       record_usage, spent)
 from evaluate import (JUDGE_TEMPERATURE, JUDGE_TOKENS, OLLAMA_JUDGE, build_item,
                       build_policy, compare, describe, read)
+from flags import flags_of
 from settings import (ADAPTATION_DIR, BENCHMARK_PATH, GENERATION, JUDGE,
                       BATCHES_DIR, MODELS, PROMPTS_PATH, PROVIDER_KEYS)
-from utils import (announce, api_key, append_line, collect, make_directories,
-                   model_slug, outstanding, read_all, read_lines, read_table,
-                   result_path, section, shape_of)
+from utils import (WORKERS, announce, api_key, append_line, collect,
+                   make_directories, model_slug, outstanding, read_all,
+                   read_lines, read_table, result_path, section, shape_of)
 
 # ----------------------------------------------------------------------------
 # Settings
@@ -111,11 +113,14 @@ def run_generation(arguments):
     batched = arguments.backend in BATCHED
     if batched:
         print(f'{arguments.batch_size} conversations to the GPU at a time')
+    elif arguments.workers > 1:
+        print(f'{arguments.workers} calls in flight at once')
     failures = collect(pending=pending, produce=produce, path=path,
                        label=arguments.model,
                        meter=meter if arguments.backend == 'api' else None,
                        produce_batch=produce_batch if batched else None,
-                       batch_size=arguments.batch_size)
+                       batch_size=arguments.batch_size,
+                       workers=arguments.workers)
 
     section('Collected')
     everything = read_all(ADAPTATION_DIR)
@@ -129,6 +134,99 @@ def run_generation(arguments):
               f'${spent:.2f}')
     return failures
 
+
+
+
+# ----------------------------------------------------------------------------
+# Live runs, in parts
+# ----------------------------------------------------------------------------
+
+# A provider with no batch queue is generated live. The pass is cut into parts
+# so that a long run is checkpointed rather than all or nothing, and so that
+# progress is visible in whole chunks rather than only as a rate. Each part
+# writes the raw responses in the shape a batch job would have returned, which
+# means the same read_batch ingests them and the same evidence is left behind.
+
+# Define function to name the file one part of a live pass writes to
+def part_path(model, part):
+    return BATCHES_DIR / f'part{part}-{model_slug(model)}_output.jsonl'
+
+
+# Define function to name the file the parts are joined into
+def joined_path(model):
+    return BATCHES_DIR / f'live-{model_slug(model)}_output.jsonl'
+
+
+# Define function to list what one part of a live pass should ask for. The split
+# is over what is outstanding at the moment it is taken, so a part rerun after a
+# failure asks only for what that part still lacks.
+def part_items(model, part, parts, replicates=None, temperature=None):
+    replicates = GENERATION['replicates'] if replicates is None else replicates
+    temperature = GENERATION['temperature'] if temperature is None else temperature
+    prompts = read_table(PROMPTS_PATH)
+    wanted = [{'prompt_id': prompt_id, 'model': model, 'replicate': replicate,
+               'backend': 'api', 'temperature': temperature}
+              for prompt_id in prompts['prompt_id']
+              for replicate in range(1, replicates + 1)]
+    pending = outstanding(wanted=wanted, keys=['prompt_id', 'replicate'],
+                          collected=read_lines(result_path(model, ADAPTATION_DIR)))
+    size = -(-len(wanted) // parts)          # ceiling, so the last part is short
+    lower, upper = (part - 1) * size, part * size
+    order = {(item['prompt_id'], str(item['replicate'])): i
+             for i, item in enumerate(wanted)}
+    return [item for item in pending
+            if lower <= order[(item['prompt_id'], str(item['replicate']))] < upper]
+
+
+# Define function to generate one part of a live pass, writing each raw response
+# as it arrives so that an interrupted part loses only the call in flight
+def generate_part(model, part, parts, replicates=None, max_tokens=None,
+                  temperature=None, workers=None):
+    max_tokens = GENERATION['max_tokens'] if max_tokens is None else max_tokens
+    items = part_items(model, part, parts, replicates, temperature)
+    path = part_path(model, part)
+    if not items:
+        return path, 0, 0
+
+    prompts = read_table(PROMPTS_PATH)
+    by_id = dict(zip(prompts['prompt_id'], prompts['prompt']))
+
+    def produce(item):
+        body = call_api(model, [{'role': 'user', 'content': by_id[item['prompt_id']]}],
+                        max_tokens, item['temperature'])
+        append_line(path, {'custom_id': f'{item["prompt_id"]}-r{item["replicate"]}',
+                           'response': {'status_code': 200, 'body': body}})
+        return {}
+
+    failures = collect(pending=items, produce=produce,
+                       path=path.with_suffix('.log.jsonl'),
+                       label=f'{model} part {part}',
+                       meter=lambda: (spent(model),
+                                      USAGE['input'] + USAGE['output']),
+                       workers=WORKERS if workers is None else workers)
+    path.with_suffix('.log.jsonl').unlink(missing_ok=True)
+    return path, len(items), failures
+
+
+# Define function to join the parts into one file and remove them, so that a
+# live pass leaves a single record of what the provider returned
+def join_parts(model, parts):
+    joined = joined_path(model)
+    present = [part_path(model, part) for part in range(1, parts + 1)]
+    present = [path for path in present if path.exists()]
+    # Nothing to join means the parts were joined already. Opening the target
+    # for writing here would empty the file that holds the whole pass, so the
+    # earlier join is reported instead.
+    if not present:
+        already = (len(joined.read_text().splitlines()) if joined.exists() else 0)
+        return joined, already
+
+    lines = [line for path in present
+             for line in path.read_text().splitlines() if line.strip()]
+    joined.write_text('\n'.join(lines) + '\n')
+    for path in present:
+        path.unlink()
+    return joined, len(lines)
 
 
 # ----------------------------------------------------------------------------
@@ -273,8 +371,7 @@ def read_batch(model, source, temperature=None):
         # because where a provider intervenes before generation is itself a
         # result, and it is kept out of the error field so that a rerun does not
         # keep resubmitting something that will be blocked again.
-        stopped = ((body.get('promptFeedback') or {}).get('blockReason')
-                   or (body.get('prompt_feedback') or {}).get('block_reason') or '')
+        stopped, cut = flags_of(body)
         error = ''
         if failure:
             error = str(failure)[:200]
@@ -285,20 +382,12 @@ def read_batch(model, source, temperature=None):
             record_usage(provider, body)
             # a reply stopped by the token cap has a censored length rather than
             # a measured one, and Response Length is an outcome measure
-            # each provider says the cap was reached in its own words
-            reasons = [str(body.get('stop_reason') or ''),
-                       str(body.get('status') or ''),
-                       *(str(c.get('finishReason') or '')
-                         for c in body.get('candidates', []))]
-            if (body.get('incomplete_details')
-                    or any(r.lower() in ('max_tokens', 'incomplete', 'length')
-                           for r in reasons)):
-                truncated += 1
+            truncated += cut
 
         append_line(path, {'prompt_id': prompt_id, 'model': model,
                            'replicate': replicate, 'backend': 'batch',
                            'temperature': temperature, 'error': error,
-                           'blocked': stopped,
+                           'blocked': stopped, 'truncated': cut,
                            'response': '' if error or stopped
                                        else read_reply(provider, body)})
         seen.add((prompt_id, replicate))
@@ -520,6 +609,9 @@ if __name__ == '__main__':
                         help='stop after this many replies, to time a pass')
     parser.add_argument('--batch-size', type=int, default=BATCH_SIZE,
                         help='conversations handed to vLLM at once')
+    parser.add_argument('--workers', type=int, default=1,
+                        help='api calls in flight at once, for a provider with '
+                             'no batch queue')
     parser.add_argument('--endpoint', default='/v1/responses',
                         help='the endpoint a batch job runs against')
     parser.add_argument('--file', default='',
