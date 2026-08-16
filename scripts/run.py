@@ -198,14 +198,33 @@ def generate_part(model, part, parts, replicates=None, max_tokens=None,
                            'response': {'status_code': 200, 'body': body}})
         return {}
 
-    failures = collect(pending=items, produce=produce,
-                       path=path.with_suffix('.log.jsonl'),
+    log = path.with_suffix('.log.jsonl')
+    failures = collect(pending=items, produce=produce, path=log,
                        label=f'{model} part {part}',
                        meter=lambda: (spent(model),
                                       USAGE['input'] + USAGE['output']),
                        workers=WORKERS if workers is None else workers)
-    path.with_suffix('.log.jsonl').unlink(missing_ok=True)
+    # the log holds why each call failed, so it is kept when any did. A clean
+    # part has nothing in it worth reading and is tidied away.
+    if failures:
+        print(f'  {failures} failed, reasons in {log.name}. They stay '
+              f'outstanding, so re-running this part retries them.')
+        for reason, count in reasons_in(log).most_common(3):
+            print(f'    {count} x {reason[:110]}')
+    else:
+        log.unlink(missing_ok=True)
     return path, len(items), failures
+
+
+# Define function to count why calls failed, so a run reports the reason rather
+# than only the number
+def reasons_in(log):
+    from collections import Counter
+    if not log.exists():
+        return Counter()
+    return Counter(json.loads(line).get('error', '')
+                   for line in log.read_text().splitlines()
+                   if line.strip() and json.loads(line).get('error'))
 
 
 # Define function to join the parts into one file and remove them, so that a
@@ -293,12 +312,17 @@ def write_batch(model, endpoint='/v1/responses', replicates=None, max_tokens=Non
         custom_id = f'{item["prompt_id"]}-r{item["replicate"]}'
         # Each provider names the parts differently. OpenAI takes a file of
         # addressed requests, Anthropic the parameters alone with the endpoint
-        # fixed for the job, and Google a key beside a bare request, with the
-        # model named once when the job is created rather than per line.
+        # fixed for the job, Google a key beside a bare request, and Mistral a
+        # body with the model stripped out, since the job carries it.
         if provider == 'anthropic':
             line = {'custom_id': custom_id, 'params': body}
         elif provider == 'google':
             line = {'key': custom_id, 'request': body}
+        elif provider == 'mistral':
+            # the model is set once when the job is created, so a line carrying
+            # one would be describing something the job does not read
+            line = {'custom_id': custom_id,
+                    'body': {k: v for k, v in body.items() if k != 'model'}}
         else:
             line = {'custom_id': custom_id, 'method': 'POST', 'url': endpoint,
                     'body': body}

@@ -49,6 +49,29 @@ RETRY_ON = {408, 409, 429, 500, 502, 503, 504}
 # signature stays the same for a local model, which costs nothing.
 USAGE = {'calls': 0, 'input': 0, 'output': 0}
 
+# When each provider may next be called, and the lock held while that is read
+# and set. A provider that publishes a rate limit refuses the surplus rather
+# than queueing it, and the retry that follows costs more than the concurrency
+# gained, so requests are spaced at the source instead of being retried.
+_NEXT_CALL = {}
+_PACING = Lock()
+
+
+# Define function to wait until a model may be called again, if its entry in the
+# panel names a rate. Called before the request rather than after a refusal,
+# because a refused request has already cost its round trip.
+def pace(model_id):
+    rate = panel_entry(model_id, 'rate', 0)
+    if not rate:
+        return
+    with _PACING:
+        now = time.monotonic()
+        ready = max(now, _NEXT_CALL.get(model_id, 0))
+        _NEXT_CALL[model_id] = ready + 1 / float(rate)
+    if ready > now:
+        time.sleep(ready - now)
+
+
 # The last call's reasoning tokens and stop reason. A live run has no result
 # file to read them back from, and both decide whether a pass is usable.
 LAST_REASONING = 0
@@ -64,6 +87,7 @@ USAGE_FIELDS = {
     'anthropic': ('usage', 'input_tokens', 'output_tokens'),
     'google': ('usageMetadata', 'promptTokenCount', 'candidatesTokenCount'),
     'deepseek': ('usage', 'prompt_tokens', 'completion_tokens'),
+    'mistral': ('usage', 'prompt_tokens', 'completion_tokens'),
 }
 
 # Where each provider takes a conversation, and how it names the pieces. OpenAI
@@ -90,7 +114,15 @@ PROVIDERS = {
         'url': 'https://api.deepseek.com/chat/completions',
         'headers': lambda key: {'Authorization': f'Bearer {key}'},
     },
+    # Mistral serves the same dialect, and does have a batch queue
+    'mistral': {
+        'url': 'https://api.mistral.ai/v1/chat/completions',
+        'headers': lambda key: {'Authorization': f'Bearer {key}'},
+    },
 }
+
+# The providers that speak the OpenAI chat completions dialect at their own host
+CHAT_COMPLETIONS = {'deepseek', 'mistral'}
 
 # ----------------------------------------------------------------------------
 # Backends
@@ -244,7 +276,7 @@ def build_payload(provider, model_id, messages, max_tokens, temperature):
         if effort:
             payload['reasoning'] = {'effort': effort}
         return payload
-    if provider == 'deepseek':
+    if provider in CHAT_COMPLETIONS:
         payload = {'model': model_id, 'max_tokens': max_tokens,
                    'messages': [{'role': m['role'], 'content': m['content']}
                                 for m in messages]}
@@ -276,7 +308,7 @@ def build_payload(provider, model_id, messages, max_tokens, temperature):
 
 # Define function to read the reply out of whatever the provider returned
 def read_reply(provider, body):
-    if provider == 'deepseek':
+    if provider in CHAT_COMPLETIONS:
         choices = body.get('choices') or []
         return (choices[0].get('message', {}).get('content') or '').strip() \
             if choices else ''
@@ -341,6 +373,7 @@ def spent(model_id, usage=None):
 # whole body rather than the text. A live run records what a batch job would
 # have returned, so that the two routes leave the same evidence behind.
 def call_api(model_id, messages, max_tokens, temperature):
+    pace(model_id)
     provider = provider_of(model_id)
     spec = PROVIDERS[provider]
     key = api_key(provider)

@@ -19,6 +19,7 @@ import sys
 import time
 from pathlib import Path
 
+
 sys.path.insert(0, 'scripts')
 import backends
 import settings
@@ -48,12 +49,34 @@ def wait_for(describe, finished):
     return describe(), int(time.time() - started), False
 
 
+# Define function to import the Mistral client, which moved between SDK versions
+# and reports an unhelpful error when the package is shadowed by a bare
+# directory of the same name
+def mistral_client(key):
+    try:
+        from mistralai import Mistral
+    except ImportError:
+        try:
+            from mistralai.client import Mistral
+        except ImportError as problem:
+            import mistralai
+            where = getattr(mistralai, '__file__', None)
+            raise SystemExit(
+                f'Could not import the Mistral client: {problem}\n'
+                + (f'mistralai resolves to {where}\n' if where else
+                   'mistralai resolved to a directory with no package in it, '
+                   'so either\nit is not installed or something of that name is '
+                   'shadowing it.\n')
+                + 'Try: pip install mistralai')
+    return Mistral(api_key=key)
+
+
 # ----------------------------------------------------------------------------
 # The one request
 # ----------------------------------------------------------------------------
 
 provider = backends.provider_of(MODEL)
-if provider not in ('openai', 'anthropic', 'google', 'deepseek'):
+if provider not in ('openai', 'anthropic', 'google', 'deepseek', 'mistral'):
     raise SystemExit(f'{MODEL} is served by {provider}, which this script does '
                      f'not cover. Use run.py generate --backend api instead.')
 if not utils.api_key(provider):
@@ -71,6 +94,10 @@ path = settings.BATCHES_DIR / 'test_requests.jsonl'
 path.parent.mkdir(parents=True, exist_ok=True)
 if provider == 'deepseek':
     line = {'custom_id': custom_id, 'body': body}
+elif provider == 'mistral':
+    # the model is named on the job, not on the line
+    line = {'custom_id': custom_id,
+            'body': {k: v for k, v in body.items() if k != 'model'}}
 elif provider == 'anthropic':
     line = {'custom_id': custom_id, 'params': body}
 elif provider == 'google':
@@ -174,6 +201,42 @@ elif provider == 'anthropic':
     cap_hit = returned.get('stop_reason') == 'max_tokens'
     decoded = (f'stop reason {returned.get("stop_reason")}, '
                f'thinking not requested')
+
+elif provider == 'mistral':
+    client = mistral_client(utils.api_key('mistral'))
+    uploaded = client.files.upload(
+        file={'file_name': path.name, 'content': path.open('rb')}, purpose='batch')
+    job = client.batch.jobs.create(input_files=[uploaded.id], model=MODEL,
+                                   endpoint='/v1/chat/completions',
+                                   metadata={'job_type': 'one request test'})
+    print(f'\nSubmitted {job.id}')
+
+    job_id = job.id
+    _, waited, _ = wait_for(
+        lambda: client.batch.jobs.get(job_id=job_id).status,
+        lambda s: s in ('SUCCESS', 'FAILED', 'TIMEOUT_EXCEEDED', 'CANCELLED'))
+    job = client.batch.jobs.get(job_id=job_id)
+    print(f'Finished  {job.status} after {waited}s')
+
+    if job.status != 'SUCCESS':
+        for problem in (job.errors or []):
+            print(f'  {getattr(problem, "message", problem)}')
+        if job.error_file:
+            print(f'  Rejections in file {job.error_file}')
+        raise SystemExit(f'Job ended as {job.status}, so the payload was refused.')
+
+    result = json.loads(client.files.download(file_id=job.output_file)
+                        .read().decode().splitlines()[0])
+    returned = (result.get('response') or {}).get('body') or {}
+    if not returned.get('choices'):
+        print(f'\nNo reply\n{json.dumps(result, indent=2)[:600]}')
+        raise SystemExit('The payload was refused. Fix it before a full pass.')
+    usage = returned.get('usage', {})
+    sent, received = usage.get('prompt_tokens', 0), usage.get('completion_tokens', 0)
+    reasoning = 0
+    finish = (returned['choices'][0] or {}).get('finish_reason', '')
+    cap_hit = finish == 'length'
+    decoded = f'finish reason {finish}'
 
 else:
     from google import genai

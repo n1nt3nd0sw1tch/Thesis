@@ -616,6 +616,7 @@ keys:
   anthropic: ANTHROPIC_API_KEY
   google: GOOGLE_API_KEY
   deepseek: DEEPSEEK_API_KEY
+  mistral: MISTRAL_API_KEY
 
 models:
   gpt:
@@ -665,6 +666,25 @@ models:
     # pricing at 16:00 UTC on 16 August 2026, and every published new rate is
     # above the rate here.
     price: {input: 0.14, output: 0.28}
+
+  mistral:
+    provider: mistral
+    id: mistral-small-2603
+    access: api
+    # Mistral Small 4, released under Apache 2.0 with the weights on Hugging
+    # Face. Open rather than proprietary, but reached over the api here because
+    # 119B parameters do not fit the nodes available, so the weights being open
+    # changes what the model is rather than how it is run.
+    weights: open
+    # The dated identifier rather than mistral-small-latest, which is an alias
+    # that moves to whichever version is current and would not mean the same
+    # thing when this is read back.
+    price: {input: 0.15, output: 0.60}
+    # Requests a second the account is allowed. Published as 0.83, held a little
+    # under so that a burst does not cross it. The token allowance of 50,000 a
+    # minute is not the binding limit here: 45 calls a minute at a thousand
+    # tokens each is 45,000.
+    rate: 0.75
 
   llama:
     provider: huggingface
