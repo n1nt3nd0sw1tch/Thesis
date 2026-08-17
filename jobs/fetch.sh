@@ -18,12 +18,26 @@ export HF_HOME="$HOME/Scratch/hf"
 mkdir -p "$HF_HOME"
 
 echo "fetching ${MODEL} into ${HF_HOME}"
+echo "space in Scratch before the fetch:"
+df -h "$HOME/Scratch" | tail -1
 python - "$MODEL" <<'PY'
 import sys
 from huggingface_hub import snapshot_download
-path = snapshot_download(sys.argv[1],
-                         allow_patterns=['*.json', '*.safetensors', '*.txt',
-                                         '*.model'])
+
+# jinja carries the chat template on newer models and py carries any remote
+# code. Both were missing before, and a compute node with no network fails on
+# the first read with an error that names the tokeniser rather than the
+# download.
+try:
+    path = snapshot_download(sys.argv[1],
+                             allow_patterns=['*.json', '*.safetensors', '*.txt',
+                                             '*.model', '*.jinja', '*.py'])
+except Exception as error:
+    if '401' in str(error) or 'gated' in str(error).lower():
+        raise SystemExit(
+            f'{sys.argv[1]} is gated. Accept the licence on its model page, '
+            f'then run huggingface-cli login on this node and try again.')
+    raise
 print(f'cached at {path}')
 PY
 
