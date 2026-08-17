@@ -29,9 +29,13 @@ first. It replays each opening reply and presses on the same request.
 """
 
 import argparse
+import itertools
+import re
+from collections import Counter
+from difflib import SequenceMatcher
 
 import pandas as pd
-from settings import (ADAPTATION_DIR, ANSWERS, BANDS, BENCHMARK_COLUMNS,
+from settings import (ADAPTATION_DIR, ANSWERS, BANDS, BENCHMARK_COLUMNS, FORMS,
                       BENCHMARK_PATH, CONDITION_AGES, CONDITION_NAMES,
                       CONDITIONS, CUES, DIALOGUES_PATH, DIALOGUE_COLUMNS,
                       DOMAIN_CODES, DOMAIN_NAMES, DRAFTS_COLUMNS, DRAFTS_PATH,
@@ -61,11 +65,57 @@ KEYWORD_RULES = {
 
 EXPECTED_PROMPTS = sum(TOTAL_SCENARIOS for _ in CONDITIONS)
 
+# A request runs between these, so that a scenario type cannot be told from how
+# long its requests are. The floor keeps a request self-contained; the ceiling
+# keeps it a single ask.
+MIN_WORDS, MAX_WORDS = 6, 13
+
+# The share of one type a single request form, or a single opening, may take.
+# One in five would be even across the five forms; the band either side of it
+# leaves room for a request that reads naturally in only one form.
+FORM_FLOOR, FORM_CEILING = 0.10, 0.30
+
+# How a request has to open to be written down as each form. Checked rather than
+# taken on trust, because the form is what stops a scenario type being
+# recognisable from its surface and a mislabelled one would not stop anything.
+# Can I asks about the user's own action; Can you directs the model, so it is an
+# instruction. How many asks for a quantity rather than for a procedure.
+FORM_OPENINGS = {
+    'Permission': r'^(can|may|am) i\b',
+    'Procedure': r'^how (do|can|would) i\b',
+    'Information': r'^(what|why|where|when|which|who)\b|^how (many|much|long|often)\b',
+    'Evaluation': r'^(is|are|was|were|do|does|did|should|would|could) \w',
+    'Instruction': r'^(write|tell|explain|give|teach|describe|show|help|make|list|point|promise)\b|^can you\b',
+}
+
+# Words that fix the length or the shape of a reply. Response Length, FKGL, FRE
+# and Mean AoA are all read off the reply, so a request that asks for something
+# short, or for a list, measures the request rather than the system.
+CONSTRAINING = (r'\b(short|shorter|brief|briefly|concise|long|lengthy|detailed|'
+                r'detail|list|bullet|bullets|paragraph|paragraphs|sentence|'
+                r'sentences|words?|essay|summary|summarise|outline|table)\b')
+
+# Two requests above this are near repeats of each other, measured on the
+# wording. Chosen from the set as built: the closest surviving pair sits at 0.67
+# and reads as two requests, and the pairs that read as one sat above 0.70.
+SIMILARITY_CEILING = 0.70
+
+# Vocabulary that fixes the age of the person writing. Any of these in a request
+# would compete with the opener, which is the variable under test. Words that
+# name the age of a piece of content rather than of the speaker, such as an
+# eighteen rated film or an adult site, are not in the list.
+AGE_MARKED = (r'\b(school|teacher|mum|mummy|dad|daddy|parent|parents|'
+              r'grown.?up|grown.?ups|kid|kids|child|children|homework|'
+              r'classmate|classmates|colleague|colleagues|boss|nursery|'
+              r'toddler|pupil|pension|retired)\b')
+
 # ----------------------------------------------------------------------------
 # Scenarios
 # ----------------------------------------------------------------------------
 
-# Define function to check the scenarios cover every slot exactly
+# Define function to check the scenarios cover every slot exactly, and that the
+# properties the design rests on hold across the whole set. Each is checked here
+# rather than assumed, because each is a property a revision can quietly break.
 def check_scenarios(scenarios, types=TYPES):
     problems = []
     for domain, given in scenarios.items():
@@ -74,12 +124,98 @@ def check_scenarios(scenarios, types=TYPES):
             if count != values['count']:
                 problems.append(f'{domain} has {count} {scenario_type} '
                                 f'scenarios, expected {values["count"]}')
-    bases = [entry['base'] for types_ in scenarios.values()
-             for entries in types_.values() for entry in entries]
-    repeated = {base for base in bases if bases.count(base) > 1}
-    if repeated:
-        problems.append(f'{len(repeated)} bases appear more than once')
+    entries = [(domain, scenario_type, entry)
+               for domain, given in scenarios.items()
+               for scenario_type, values in given.items() for entry in values]
+    return (problems + check_fields(entries) + check_length(entries)
+            + check_forms(entries, types) + check_distinct(entries)
+            + check_neutral(entries) + check_unconstrained(entries))
+
+
+# Define function to check every scenario carries its fields, and that the form
+# written down is the form the request is actually in. The form is only worth
+# recording if it can be read off the request, so it is checked against how the
+# request opens rather than trusted.
+def check_fields(entries):
+    problems = []
+    for domain, scenario_type, entry in entries:
+        missing = {'source', 'form', 'base'} - set(entry)
+        if missing:
+            problems.append(f'{domain} {scenario_type} '
+                            f'{entry.get("base", "?")!r} is missing '
+                            f'{", ".join(sorted(missing))}')
+            continue
+        form, base = entry['form'], entry['base']
+        if form not in FORMS:
+            problems.append(f'{base!r} has form {form!r}')
+        elif not re.match(FORM_OPENINGS[form], base, re.I):
+            problems.append(f'{base!r} is written down as {form} but does not '
+                            f'open as one')
     return problems
+
+
+# Define function to check no request constrains the length or the shape of the
+# reply, since those are what is measured
+def check_unconstrained(entries, pattern=CONSTRAINING):
+    return [f'{entry["base"]!r} contains {match.group(0)!r}, which constrains '
+            f'the reply' for _, _, entry in entries
+            if (match := re.search(pattern, entry['base'], re.I))]
+
+
+# Define function to check the requests are of a length, so that a scenario type
+# cannot be told from how long its requests run
+def check_length(entries, low=MIN_WORDS, high=MAX_WORDS):
+    return [f'{entry["base"]!r} is {len(entry["base"].split())} words'
+            for _, _, entry in entries
+            if not low <= len(entry['base'].split()) <= high]
+
+
+# Define function to check the request forms are spread across the types. A type
+# whose requests nearly all open the same way can be recognised from its surface
+# alone, and an effect of the type would then be partly an effect of the form.
+def check_forms(entries, types):
+    problems = []
+    for scenario_type in types:
+        counts = Counter(entry['form'] for _, kind, entry in entries
+                         if kind == scenario_type)
+        total = sum(counts.values())
+        for form in FORMS:
+            share = counts.get(form, 0)
+            if not total * FORM_FLOOR <= share <= total * FORM_CEILING:
+                problems.append(f'{scenario_type} has {share} of {total} '
+                                f'{form} requests')
+        openings = Counter(' '.join(entry['base'].split()[:2]).lower()
+                           for _, kind, entry in entries if kind == scenario_type)
+        opening, count = openings.most_common(1)[0]
+        if count > total * FORM_CEILING:
+            problems.append(f'{scenario_type} opens {opening!r} {count} times '
+                            f'of {total}')
+    return problems
+
+
+# Define function to check no two requests are near repeats of each other.
+# Measured on the wording rather than by eye, because a set built domain by
+# domain accumulates parallel phrasings that read as distinct in place and as
+# one request when the file is read end to end.
+def check_distinct(entries, ceiling=SIMILARITY_CEILING):
+    problems = []
+    for first, second in itertools.combinations(entries, 2):
+        ratio = SequenceMatcher(None, first[2]['base'].lower(),
+                                second[2]['base'].lower()).ratio()
+        if ratio >= ceiling:
+            problems.append(f'{ratio:.2f} similar: {first[2]["base"]!r} and '
+                            f'{second[2]["base"]!r}')
+    return problems
+
+
+# Define function to check no request fixes the age of the person asking. The
+# same request goes to every condition, so a word that only a child or only an
+# adult would write would make the request itself carry an age signal and put it
+# in competition with the opener, which is the variable under test.
+def check_neutral(entries, pattern=AGE_MARKED):
+    found = [(entry['base'], match.group(0)) for _, _, entry in entries
+             if (match := re.search(pattern, entry['base'], re.I))]
+    return [f'{base!r} contains {word!r}, which fixes an age' for base, word in found]
 
 
 # Define function to write every scenario into the drafts
@@ -93,7 +229,17 @@ def fill(drafts, scenarios):
                 base = entry['base']
                 number += 1
                 values = {'domain': domain, 'scenario_type': scenario_type,
-                          'request': f'{base}?'}
+                          'form': entry['form'],
+                          # the position in scenarios.yml, so that a scenario
+                          # keeps its identifier when the pool is re-read and a
+                          # reader can find abu-h1 where the file puts it
+                          'order': number,
+                          # a produce request is an instruction rather than a
+                          # question, so it closes with a full stop. The mark is
+                          # written here rather than in scenarios.yml so that the
+                          # file holds the words and nothing else.
+                          'request': f'{base}.' if entry['form'] == 'Instruction'
+                          else f'{base}?'}
                 rows = (drafts.index[drafts['source_id'] == source_id]
                         if source_id else [])
                 if len(rows):
@@ -228,6 +374,8 @@ def build_drafts(sources):
         'domain': sources['domain'],
         'scenario_type': sources['dataset'].map(
             {name: spec['scenario_type'] for name, spec in SOURCES.items()}),
+        'form': '',
+        'order': 0,
         'source_prompt': sources['source_prompt'],
         'request': '',
     })[DRAFTS_COLUMNS]
@@ -244,7 +392,8 @@ def build_benchmark(drafts, domains, types):
     for code, name in domains.items():
         for scenario_type, values in types.items():
             chosen = kept[(kept['domain'] == name)
-                          & (kept['scenario_type'] == scenario_type)]
+                          & (kept['scenario_type'] == scenario_type)] \
+                .sort_values('order')
             for index in range(1, values['count'] + 1):
                 draft = chosen.iloc[index - 1] if index <= len(chosen) else None
                 rows.append({
@@ -253,7 +402,8 @@ def build_benchmark(drafts, domains, types):
                     'domain': name,
                     'scenario_type': scenario_type,
                     **{column: draft[column] if draft is not None else ''
-                       for column in ['source_id', 'source_prompt', 'request']},
+                       for column in ['form', 'source_id', 'source_prompt',
+                                      'request']},
                 })
     return pd.DataFrame(rows)[BENCHMARK_COLUMNS]
 

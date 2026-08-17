@@ -92,7 +92,8 @@ JUDGES = SETTINGS['judges']
 JUDGE = JUDGES['primary']
 
 SCENARIOS = SCENARIO_SETTINGS['scenarios']
-WHO = SCENARIO_SETTINGS['who']
+# The band a cue names is carried by the condition's opener in settings.yml, so
+# the scenarios file holds scenarios and nothing else.
 
 # ----------------------------------------------------------------------------
 # The age conditions
@@ -153,6 +154,8 @@ SIGNALS = sorted({condition['signal'] for condition in CONDITIONS})
 DOMAIN_NAMES = {code: values['name'] for code, values in DOMAINS.items()}
 DOMAIN_CODES = {name: code for code, name in DOMAIN_NAMES.items()}
 TYPE_ANSWERS = {name: values['answers'] for name, values in TYPES.items()}
+TYPE_CODES = {name: values['code'] for name, values in TYPES.items()}
+FORMS = SETTINGS['forms']
 PER_DOMAIN = sum(values['count'] for values in TYPES.values())
 TOTAL_SCENARIOS = PER_DOMAIN * len(DOMAINS)
 
@@ -168,8 +171,8 @@ DATASET_NAMES = sorted({spec['name'] for spec in SOURCES.values()} | {AUTHORED})
 # no variants of it. The request is what a system is asked in every condition.
 # The candidate pool: one row per usable source record. Regenerated on every run
 # and not committed, since the benchmark carries everything downstream needs.
-DRAFTS_COLUMNS = ['source_id', 'dataset', 'domain', 'scenario_type',
-                  'source_prompt', 'request']
+DRAFTS_COLUMNS = ['source_id', 'dataset', 'domain', 'scenario_type', 'form',
+                  'order', 'source_prompt', 'request']
 
 # The benchmark is self-contained, so that the released file needs nothing else
 # read alongside it. Provenance travels with the scenario rather than being
@@ -179,7 +182,7 @@ DRAFTS_COLUMNS = ['source_id', 'dataset', 'domain', 'scenario_type',
 # before it was rewritten, blank where there was none. The two texts sit next to
 # each other at the end, so the adaptation can be read across a single row.
 BENCHMARK_COLUMNS = ['scenario_id', 'source_id', 'dataset', 'domain',
-                     'scenario_type', 'source_prompt', 'request']
+                     'scenario_type', 'form', 'source_prompt', 'request']
 
 # The request is stored beside the prompt so that byte identity across
 # conditions can be checked by reading the file rather than by rebuilding it.
@@ -227,9 +230,15 @@ assert all(answer in ANSWERS for answers in TYPE_ANSWERS.values()
 assert all([ANSWERS.index(answers[band]) for band in AGE_BANDS]
            == sorted(ANSWERS.index(answer) for answer in answers.values())
            for answers in TYPE_ANSWERS.values() if answers)
-assert len({tuple(answers[band] for band in AGE_BANDS)
-            for answers in TYPE_ANSWERS.values() if answers}) \
-    == len([answers for answers in TYPE_ANSWERS.values() if answers])
+# Two types may share an expected answer, since Rights and Benign differ in
+# salience rather than in what is expected of a reply, so the pair of answers
+# and salience is what has to be unique.
+assert len({(tuple(values['answers'][band] for band in AGE_BANDS),
+             values['salience'])
+            for values in TYPES.values() if values['answers']}) \
+    == len([values for values in TYPES.values() if values['answers']])
+assert all(values['salience'] in ('High', 'Low') for values in TYPES.values())
+assert len(set(TYPE_CODES.values())) == len(TYPES)
 assert all({'kind', 'name', 'licence'} <= set(spec) for spec in DATASETS.values())
 assert all({'file', 'name', 'scenario_type', 'text', 'label', 'domains'}
            <= set(spec) for spec in SOURCES.values())
