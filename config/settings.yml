@@ -138,7 +138,7 @@ types:
 # can be recognised from its surface alone, which it could in the earlier set
 # where four in five Age Sensitive requests opened with "Can I", and an effect
 # of type would be partly an effect of form.
-forms: [Permission, Procedure, Information, Evaluation, Instruction]
+categories: [Instruction, Information]
 
 # The kinds of evidence an age signal can carry. Explicit conditions state an
 # age; an implicit condition carries the cue the scenario's variants use, which
@@ -625,6 +625,12 @@ sources:
 # ----------------------------------------------------------------------------
 
 generation:
+  # Reasoning is switched off across the panel. Every provider ships a different
+  # default, from none on Haiku to high on DeepSeek, so leaving them alone would
+  # mean five configurations rather than one, and a difference between models
+  # would confound the model with its reasoning budget. Off is the setting all
+  # five can be held at. Set to provider to leave each at its own default.
+  reasoning: none
   # One is the decoding every provider in the panel defaults to, and the one
   # model that refuses the parameter runs at it whatever is asked. Setting it
   # here rather than relying on those defaults agreeing keeps the choice on
@@ -635,7 +641,7 @@ generation:
   # measures would read a severed clause as the whole reply. A pilot at 512 cut
   # nine per cent of replies, and cut the longest hardest, which biases the
   # comparison because replies to adults run longer.
-  max_tokens: 4096
+  max_tokens: 1024
   replicates: 3
 
 # Environment variable each provider reads its key from. Set them in .env,
@@ -663,6 +669,7 @@ keys:
   google: GOOGLE_API_KEY
   deepseek: DEEPSEEK_API_KEY
   mistral: MISTRAL_API_KEY
+  qwen: DASHSCOPE_API_KEY
 
 models:
   gpt:
@@ -670,10 +677,10 @@ models:
     id: gpt-5.6-luna
     access: api
     weights: proprietary
-    # This model rejects temperature and top_p outright, so it runs at whatever
-    # the provider decodes at. Declared rather than discovered, because the
-    # replicate agreement measure compares models sampled the same way and this
-    # one cannot be.
+    # This model rejects temperature and top_p outright, whatever the reasoning
+    # setting, so it runs at whatever the provider decodes at. Declared rather
+    # than discovered, because the replicate agreement measure compares models
+    # sampled the same way and this one cannot be.
     sampling: provider
     price: {input: 0.20, output: 1.20}
 
@@ -701,13 +708,15 @@ models:
     provider: deepseek
     id: deepseek-v4-flash
     access: api
-    weights: proprietary
+    # MIT licensed with the weights on Hugging Face, 284B total and 13B active.
+    # Open rather than proprietary, but reached over the api because the
+    # checkpoint does not fit the nodes available.
+    weights: open
     # No batch endpoint, so this model is generated live rather than queued.
     # Thinking is enabled by default at effort high, the highest default in the
     # panel, and in thinking mode the api documents that temperature and top_p
-    # are accepted without error and have no effect. Declared here so that the
-    # request stops claiming a decoding the model does not apply.
-    sampling: provider
+    # are accepted without error and have no effect. With thinking disabled they
+    # apply again, so no sampling declaration is needed.
     # Rates are the pre-16 August ones; DeepSeek moves to peak and off-peak
     # pricing at 16:00 UTC on 16 August 2026, and every published new rate is
     # above the rate here.
@@ -732,6 +741,24 @@ models:
     # tokens each is 45,000.
     rate: 0.75
 
+  qwen_api:
+    provider: qwen
+    id: qwen3.8-2.4t-a95b
+    access: api
+    # Open weights, 2.4T total with about 95B active per step, reached over the
+    # api because nothing that size fits the nodes available.
+    weights: open
+    price: {input: 2.00, output: 6.00}
+
+  gemma:
+    provider: huggingface
+    id: google/gemma-3-27b-it
+    access: local
+    # Google's open release, run on Myriad rather than through an api. Paired
+    # with gemini-3.5-flash-lite it gives the same lab on both sides of the
+    # weights split, which is the comparison the panel is otherwise missing.
+    weights: open
+
   llama:
     provider: huggingface
     id: meta-llama/Llama-3.3-70B-Instruct
@@ -744,10 +771,13 @@ models:
     access: local
     weights: open
 
-  deepseek:
-    provider: huggingface
-    id: deepseek-ai/DeepSeek-R1
-    access: local
+  # DeepSeek-R1 is 671B, which is 1,342GB at bf16 against 140GB of usable VRAM
+  # on four A100 40GB, so it cannot run here. The V4 Flash entry above reaches
+  # the same lab's current model over the api instead.
+  # deepseek:
+  #   provider: huggingface
+  #   id: deepseek-ai/DeepSeek-R1
+  #   access: local
     weights: open
 
 # Scores the responses against the expected action. Kept apart from the panel

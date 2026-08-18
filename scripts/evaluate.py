@@ -27,7 +27,9 @@ import re
 import pandas as pd
 import textstat
 from backends import BATCH_SIZE, BATCHED, BACKENDS, generate, generate_many
+from nltk import download as nltk_download
 from nltk import word_tokenize
+from nltk.data import find as nltk_find
 from settings import (ADAPTATION_DIR, ANSWERS, AOA_PATH, BENCHMARK_PATH, JUDGE,
                       JUDGEMENTS_DIR, JUDGEMENTS_PATH, JUDGEMENT_COLUMNS,
                       LANGUAGE, PROMPTS_PATH, SAFETY, measure_column)
@@ -50,6 +52,18 @@ OLLAMA_JUDGE = 'gpt-oss-safeguard:20b'
 
 # A word counts as difficult for a reader of this age when it is acquired later.
 DIFFICULT_ABOVE = 10
+
+# The word tokeniser needs a data file that pip does not install, and nltk only
+# says so at the point of first use, several stages into a run. Fetched here
+# instead, once, so a fresh checkout scores without a detour.
+for RESOURCE in ['punkt_tab', 'punkt']:
+    try:
+        nltk_find(f'tokenizers/{RESOURCE}')
+        break
+    except LookupError:
+        if nltk_download(RESOURCE, quiet=True):
+            break
+
 
 # Kuperman, Stadthagen-Gonzalez and Brysbaert (2012), downloaded by download.py.
 # The column names differ between the published supplement and the copies of it

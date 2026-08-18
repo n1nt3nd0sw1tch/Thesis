@@ -88,6 +88,7 @@ USAGE_FIELDS = {
     'google': ('usageMetadata', 'promptTokenCount', 'candidatesTokenCount'),
     'deepseek': ('usage', 'prompt_tokens', 'completion_tokens'),
     'mistral': ('usage', 'prompt_tokens', 'completion_tokens'),
+    'qwen': ('usage', 'prompt_tokens', 'completion_tokens'),
 }
 
 # Where each provider takes a conversation, and how it names the pieces. OpenAI
@@ -119,10 +120,16 @@ PROVIDERS = {
         'url': 'https://api.mistral.ai/v1/chat/completions',
         'headers': lambda key: {'Authorization': f'Bearer {key}'},
     },
+    # Qwen serves the same dialect from DashScope's compatible endpoint
+    'qwen': {
+        'url': 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1/'
+               'chat/completions',
+        'headers': lambda key: {'Authorization': f'Bearer {key}'},
+    },
 }
 
 # The providers that speak the OpenAI chat completions dialect at their own host
-CHAT_COMPLETIONS = {'deepseek', 'mistral'}
+CHAT_COMPLETIONS = {'deepseek', 'mistral', 'qwen'}
 
 # ----------------------------------------------------------------------------
 # Backends
@@ -232,12 +239,13 @@ def takes_sampling(model_id):
     return str(panel_entry(model_id, 'sampling', '')).lower() != 'provider'
 
 
-# Define function to read the reasoning effort a model should be run at. An
-# absent setting, or the word default, sends nothing and leaves the provider to
-# decide, which is what a user of the deployed system receives.
-def reasoning_of(model_id):
-    effort = str(panel_entry(model_id, 'reasoning', '') or '').strip().lower()
-    return '' if effort in ('', 'default') else effort
+# Define function to read whether reasoning is to be switched off. The panel
+# setting applies to every model; a model may override it, which is how one arm
+# is run both ways for the comparison rather than by editing the panel.
+def reasoning_off(model_id):
+    setting = str(panel_entry(model_id, 'reasoning', '')
+                  or GENERATION.get('reasoning', 'provider')).strip().lower()
+    return setting == 'none'
 
 
 # Define function to find which provider serves a model, from the panel rather
@@ -256,7 +264,7 @@ def provider_of(model_id):
 def build_payload(provider, model_id, messages, max_tokens, temperature):
     system = ' '.join(m['content'] for m in messages if m['role'] == 'system')
     turns = [m for m in messages if m['role'] != 'system']
-    effort = reasoning_of(model_id)
+    off = reasoning_off(model_id)
     if provider == 'openai':
         # Sampling is sent where the model accepts it, so that as much of the
         # panel as possible is decoded the same way. Where it is refused the
@@ -273,15 +281,24 @@ def build_payload(provider, model_id, messages, max_tokens, temperature):
         # reasoning tokens are billed as output and count against the cap, so a
         # model left to think by default can spend the whole budget before it
         # writes anything
-        if effort:
-            payload['reasoning'] = {'effort': effort}
+        if off:
+            payload['reasoning'] = {'effort': 'none'}
         return payload
     if provider in CHAT_COMPLETIONS:
         payload = {'model': model_id, 'max_tokens': max_tokens,
                    'messages': [{'role': m['role'], 'content': m['content']}
                                 for m in messages]}
-        # In thinking mode these are accepted and ignored, so sending them would
-        # put a decoding in the request that the model never applies
+        # Each names the switch differently: DeepSeek takes a thinking block,
+        # Qwen a flag, Mistral an effort level
+        if off:
+            if provider == 'deepseek':
+                payload['thinking'] = {'type': 'disabled'}
+            elif provider == 'qwen':
+                payload['enable_thinking'] = False
+            else:
+                payload['reasoning_effort'] = 'none'
+        # DeepSeek ignores these in thinking mode and honours them out of it, so
+        # they are sent whenever the model has not declared that it refuses them
         if takes_sampling(model_id):
             payload['temperature'] = temperature
             payload['top_p'] = GENERATION['top_p']
@@ -295,12 +312,15 @@ def build_payload(provider, model_id, messages, max_tokens, temperature):
                                 for m in turns]}
         if system:
             payload['system'] = system
+        # Extended thinking is opt in here, so off is the state of not asking
         return payload
     payload = {'contents': [{'role': 'user' if m['role'] == 'user' else 'model',
                              'parts': [{'text': m['content']}]} for m in turns],
                'generationConfig': {'maxOutputTokens': max_tokens,
                                     'temperature': temperature,
                                     'topP': GENERATION['top_p']}}
+    if off:
+        payload['generationConfig']['thinkingConfig'] = {'thinkingBudget': 0}
     if system:
         payload['systemInstruction'] = {'parts': [{'text': system}]}
     return payload
@@ -310,8 +330,17 @@ def build_payload(provider, model_id, messages, max_tokens, temperature):
 def read_reply(provider, body):
     if provider in CHAT_COMPLETIONS:
         choices = body.get('choices') or []
-        return (choices[0].get('message', {}).get('content') or '').strip() \
-            if choices else ''
+        if not choices:
+            return ''
+        content = choices[0].get('message', {}).get('content') or ''
+        # With reasoning on, the content arrives as a list of blocks rather than
+        # a string, and the thinking is one of them. Taking the whole list would
+        # put the model's deliberation into the text that gets scored.
+        if isinstance(content, list):
+            content = ''.join(part.get('text', '') if isinstance(part, dict)
+                              and part.get('type') != 'thinking' else ''
+                              for part in content)
+        return str(content).strip()
     if provider == 'openai':
         if body.get('output_text'):
             return str(body['output_text']).strip()

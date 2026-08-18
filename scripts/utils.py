@@ -15,7 +15,7 @@ from threading import Lock
 
 import pandas as pd
 from settings import (BENCHMARK_COLUMNS, DATASET_NAMES, DATA_DIRS, DOMAIN_NAMES,
-                      DRAFTS_COLUMNS, ENV_PATH, FORMS, PROVIDER_KEYS, TYPES)
+                      DRAFTS_COLUMNS, ENV_PATH, CATEGORIES, PROVIDER_KEYS, TYPES)
 
 # ----------------------------------------------------------------------------
 # Identifiers
@@ -191,7 +191,7 @@ def check_drafts(drafts):
                         labels={'domain': DOMAIN_NAMES.values(),
                                 'dataset': DATASET_NAMES + [''],
                                 'scenario_type': TYPES,
-                                'form': FORMS + ['']})
+                                'category': CATEGORIES + ['']})
     if problems:
         return problems
     return problems
@@ -205,7 +205,7 @@ def check_benchmark(scenarios):
                     labels={'scenario_type': TYPES,
                             'domain': DOMAIN_NAMES.values(),
                             'dataset': DATASET_NAMES + [''],
-                            'form': FORMS})
+                            'category': CATEGORIES})
 
 
 # ----------------------------------------------------------------------------

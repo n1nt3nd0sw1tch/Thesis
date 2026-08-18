@@ -35,7 +35,7 @@ from collections import Counter
 from difflib import SequenceMatcher
 
 import pandas as pd
-from settings import (ADAPTATION_DIR, ANSWERS, BANDS, BENCHMARK_COLUMNS, FORMS,
+from settings import (ADAPTATION_DIR, ANSWERS, BANDS, BENCHMARK_COLUMNS, CATEGORIES,
                       BENCHMARK_PATH, CONDITION_AGES, CONDITION_NAMES,
                       CONDITIONS, CUES, DIALOGUES_PATH, DIALOGUE_COLUMNS,
                       DOMAIN_CODES, DOMAIN_NAMES, DRAFTS_COLUMNS, DRAFTS_PATH,
@@ -70,17 +70,21 @@ EXPECTED_PROMPTS = sum(TOTAL_SCENARIOS for _ in CONDITIONS)
 # keeps it a single ask.
 MIN_WORDS, MAX_WORDS = 6, 13
 
-# How a request has to open to be written down as each form. Checked rather than
-# taken on trust, because the form is what stops a scenario type being
+# How a request has to open to be written down as each category. Checked rather
+# than taken on trust, because the category is what stops a scenario type being
 # recognisable from its surface and a mislabelled one would not stop anything.
 # Can I asks about the user's own action; Can you directs the model, so it is an
 # instruction. How many asks for a quantity rather than for a procedure.
-FORM_OPENINGS = {
-    'Permission': r'^(can|may|am) i\b',
-    'Procedure': r'^how (do|can|would) i\b',
-    'Information': r'^(what|why|where|when|which|who)\b|^how (many|much|long|often)\b',
-    'Evaluation': r'^(is|are|was|were|do|does|did|should|would|could) \w',
-    'Instruction': r'^(write|tell|explain|give|teach|describe|show|help|make|point|promise)\b|^can you\b',
+CATEGORY_OPENINGS = {
+    # Instruction asks the model to do something. Either an imperative, or the
+    # interrogative that asks for the same thing: how do I.
+    'Instruction': r'^(write|tell|explain|give|teach|describe|show|help|make|'
+                   r'point|promise)\b|^can you\b|^how (do|can|would) i\b',
+    # Information asks for a fact, a reason, or a judgement. The wh words, and
+    # the yes or no openings that ask whether rather than how.
+    'Information': r'^(what|why|where|when|which|who)\b|'
+                   r'^how (many|much|long|often)\b|^(can|may|am) i\b|'
+                   r'^(is|are|was|were|do|does|did|should|would|could) \w',
 }
 
 # Words that fix the length or the shape of a reply. Response Length, FKGL, FRE
@@ -123,28 +127,28 @@ def check_scenarios(scenarios, types=TYPES):
                for domain, given in scenarios.items()
                for scenario_type, values in given.items() for entry in values]
     return (problems + check_fields(entries) + check_length(entries)
-            + check_forms(entries, types) + check_distinct(entries)
+            + check_categories(entries, types) + check_distinct(entries)
             + check_neutral(entries) + check_unconstrained(entries))
 
 
-# Define function to check every scenario carries its fields, and that the form
-# written down is the form the request is actually in. The form is only worth
+# Define function to check every scenario carries its fields, and that the
+# category written down is the one the request is actually in. It is only worth
 # recording if it can be read off the request, so it is checked against how the
 # request opens rather than trusted.
 def check_fields(entries):
     problems = []
     for domain, scenario_type, entry in entries:
-        missing = {'source', 'form', 'base'} - set(entry)
+        missing = {'source', 'category', 'base'} - set(entry)
         if missing:
             problems.append(f'{domain} {scenario_type} '
                             f'{entry.get("base", "?")!r} is missing '
                             f'{", ".join(sorted(missing))}')
             continue
-        form, base = entry['form'], entry['base']
-        if form not in FORMS:
-            problems.append(f'{base!r} has form {form!r}')
-        elif not re.match(FORM_OPENINGS[form], base, re.I):
-            problems.append(f'{base!r} is written down as {form} but does not '
+        category, base = entry['category'], entry['base']
+        if category not in CATEGORIES:
+            problems.append(f'{base!r} has category {category!r}')
+        elif not re.match(CATEGORY_OPENINGS[category], base, re.I):
+            problems.append(f'{base!r} is written down as {category} but does not '
                             f'open as one')
     return problems
 
@@ -165,22 +169,24 @@ def check_length(entries, low=MIN_WORDS, high=MAX_WORDS):
             if not low <= len(entry['base'].split()) <= high]
 
 
-# Define function to check every domain by type cell holds one of each form.
+# Define function to check every domain by type cell holds one of each category.
 # This is an exact cover rather than a balance band: a set that passes it is
-# fully crossed on domain, type and form, and no arrangement can satisfy it by
+# fully crossed on domain, type and category, and no arrangement can satisfy it by
 # accident the way a share of a total can.
-def check_forms(entries, types):
+def check_categories(entries, types):
     problems = []
     cells = {}
     for domain, scenario_type, entry in entries:
-        cells.setdefault((domain, scenario_type), []).append(entry['form'])
+        cells.setdefault((domain, scenario_type), []).append(entry['category'])
+    # A cell holds five scenarios over two forms, so one category has three and the
+    # other two. Which way round alternates, so that both forms come out level
+    # across every domain and every type rather than within every cell.
     for (domain, scenario_type), forms in sorted(cells.items()):
         counts = Counter(forms)
-        for form in FORMS:
-            if counts.get(form, 0) != 1:
-                problems.append(f'{domain} {scenario_type} has '
-                                f'{counts.get(form, 0)} {form} requests, '
-                                f'expected 1')
+        if sorted(counts.get(category, 0) for category in CATEGORIES) != [2, 3]:
+            problems.append(f'{domain} {scenario_type} splits '
+                            f'{dict(counts)}, expected three of one category and '
+                            f'two of the other')
     return problems
 
 
@@ -220,7 +226,7 @@ def fill(drafts, scenarios):
                 base = entry['base']
                 number += 1
                 values = {'domain': domain, 'scenario_type': scenario_type,
-                          'form': entry['form'],
+                          'category': entry['category'],
                           # the position in scenarios.yml, so that a scenario
                           # keeps its identifier when the pool is re-read and a
                           # reader can find abu-h1 where the file puts it
@@ -229,7 +235,7 @@ def fill(drafts, scenarios):
                           # question, so it closes with a full stop. The mark is
                           # written here rather than in scenarios.yml so that the
                           # file holds the words and nothing else.
-                          'request': f'{base}.' if entry['form'] == 'Instruction'
+                          'request': f'{base}.' if entry['category'] == 'Instruction'
                           else f'{base}?'}
                 rows = (drafts.index[drafts['source_id'] == source_id]
                         if source_id else [])
@@ -365,7 +371,7 @@ def build_drafts(sources):
         'domain': sources['domain'],
         'scenario_type': sources['dataset'].map(
             {name: spec['scenario_type'] for name, spec in SOURCES.items()}),
-        'form': '',
+        'category': '',
         'order': 0,
         'source_prompt': sources['source_prompt'],
         'request': '',
@@ -393,7 +399,7 @@ def build_benchmark(drafts, domains, types):
                     'domain': name,
                     'scenario_type': scenario_type,
                     **{column: draft[column] if draft is not None else ''
-                       for column in ['form', 'source_id', 'source_prompt',
+                       for column in ['category', 'source_id', 'source_prompt',
                                       'request']},
                 })
     return pd.DataFrame(rows)[BENCHMARK_COLUMNS]

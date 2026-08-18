@@ -155,7 +155,7 @@ DOMAIN_NAMES = {code: values['name'] for code, values in DOMAINS.items()}
 DOMAIN_CODES = {name: code for code, name in DOMAIN_NAMES.items()}
 TYPE_ANSWERS = {name: values['answers'] for name, values in TYPES.items()}
 TYPE_CODES = {name: values['code'] for name, values in TYPES.items()}
-FORMS = SETTINGS['forms']
+CATEGORIES = SETTINGS['categories']
 PER_DOMAIN = sum(values['count'] for values in TYPES.values())
 TOTAL_SCENARIOS = PER_DOMAIN * len(DOMAINS)
 
@@ -171,7 +171,7 @@ DATASET_NAMES = sorted({spec['name'] for spec in SOURCES.values()} | {AUTHORED})
 # no variants of it. The request is what a system is asked in every condition.
 # The candidate pool: one row per usable source record. Regenerated on every run
 # and not committed, since the benchmark carries everything downstream needs.
-DRAFTS_COLUMNS = ['source_id', 'dataset', 'domain', 'scenario_type', 'form',
+DRAFTS_COLUMNS = ['source_id', 'dataset', 'domain', 'scenario_type', 'category',
                   'order', 'source_prompt', 'request']
 
 # The benchmark is self-contained, so that the released file needs nothing else
@@ -182,7 +182,7 @@ DRAFTS_COLUMNS = ['source_id', 'dataset', 'domain', 'scenario_type', 'form',
 # before it was rewritten, blank where there was none. The two texts sit next to
 # each other at the end, so the adaptation can be read across a single row.
 BENCHMARK_COLUMNS = ['scenario_id', 'source_id', 'dataset', 'domain',
-                     'scenario_type', 'form', 'source_prompt', 'request']
+                     'scenario_type', 'category', 'source_prompt', 'request']
 
 # The request is stored beside the prompt so that byte identity across
 # conditions can be checked by reading the file rather than by rebuilding it.

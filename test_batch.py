@@ -3,6 +3,7 @@
     python test_batch.py                                  gpt-5.6-luna
     python test_batch.py claude-haiku-4-5-20251001
     python test_batch.py deepseek-v4-flash                live, no batch queue
+    python test_batch.py qwen3.8-2.4t-a95b                live
     python test_batch.py gpt-5.6-luna bod-a3-age09        a chosen prompt
 
 Run it from the repository root. It writes a one line request file, submits it,
@@ -76,7 +77,8 @@ def mistral_client(key):
 # ----------------------------------------------------------------------------
 
 provider = backends.provider_of(MODEL)
-if provider not in ('openai', 'anthropic', 'google', 'deepseek', 'mistral'):
+if provider not in ('openai', 'anthropic', 'google', 'deepseek', 'mistral',
+                    'qwen'):
     raise SystemExit(f'{MODEL} is served by {provider}, which this script does '
                      f'not cover. Use run.py generate --backend api instead.')
 if not utils.api_key(provider):
@@ -92,7 +94,7 @@ custom_id = f'{row["prompt_id"]}-r1'
 
 path = settings.BATCHES_DIR / 'test_requests.jsonl'
 path.parent.mkdir(parents=True, exist_ok=True)
-if provider == 'deepseek':
+if provider in ('deepseek', 'qwen'):
     line = {'custom_id': custom_id, 'body': body}
 elif provider == 'mistral':
     # the model is named on the job, not on the line
@@ -116,8 +118,8 @@ print(f'Payload   {json.dumps(body)}')
 # Submit, wait, and read the one result back
 # ----------------------------------------------------------------------------
 
-if provider == 'deepseek':
-    # No batch queue here, so the one request goes straight out. The point of
+if provider in ('deepseek', 'qwen'):
+    # Sent live rather than queued. The point of
     # the test is the same: prove the payload is accepted and measure what a
     # reply costs before committing to four thousand of them.
     print('\nNo batch queue for this provider, sending live')

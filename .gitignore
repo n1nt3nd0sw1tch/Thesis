@@ -29,6 +29,7 @@ ENV/
 
 # Downloaded datasets
 data/original/
+data/sources/original/
 examples/
 archive/
 

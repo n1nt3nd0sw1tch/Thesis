@@ -45,8 +45,20 @@ check('sampling matches what the panel declares', takes == sent,
 if not takes:
     print(f"        {MODEL} rejects temperature and top_p, so it runs at the "
           f"provider's own decoding")
-check('reasoning left to the provider', 'reasoning' not in probe,
-      probe.get('reasoning', 'no key sent'))
+# reasoning is off across the panel, in whichever word this provider uses
+import json as _json
+sent = _json.dumps(probe)
+switched = ('"effort": "none"' in sent or '"type": "disabled"' in sent
+            or '"thinkingBudget": 0' in sent or '"reasoning_effort": "none"' in sent
+            or '"enable_thinking": false' in sent)
+wanted = str(settings.GENERATION.get('reasoning', 'provider')).lower() == 'none'
+if provider == 'anthropic':
+    check('reasoning off', not switched,
+          'extended thinking is opt in, so off is not asking for it')
+else:
+    check('reasoning off' if wanted else 'reasoning left to the provider',
+          switched == wanted,
+          'switched off in the payload' if switched else 'nothing sent')
 # each provider names the cap differently, and Google nests it
 cap = (probe.get('max_output_tokens') or probe.get('max_tokens')
        or (probe.get('generationConfig') or {}).get('maxOutputTokens'))
