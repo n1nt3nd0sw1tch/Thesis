@@ -62,9 +62,12 @@ FALLBACK_PROMPTS = [
 TEMPERATURE = 0.0
 MAX_TOKENS = 1024
 
-# Replies in a full pass of one model: 2,400 prompts at two replicates, plus
-# the later assistant turns of the persistence extension.
-FULL_PASS = 2400 * 2 + 2000
+# Replies in a full judging pass across the whole panel: 2,400 prompts at two
+# replicates, plus the later assistant turns of the persistence extension, for
+# each system evaluated. Counting one system rather than the panel understates
+# the figure by the size of the panel, which is the whole point of the estimate.
+PANEL = 5
+FULL_PASS = (2400 * 2 + 2000) * PANEL
 
 REPORT_DIR = Path('results/probe')
 
@@ -365,6 +368,28 @@ def score_vllm(engine, conversations, effort):
     return [output.outputs[0].text.strip() for output in outputs]
 
 
+# Define function to ask an OpenAI compatible endpoint what it serves. A local
+# server registers a model under whatever name it was loaded with, often the
+# file name, so a mismatch reads as "model not found" and says nothing about
+# what would have worked.
+def report_endpoint(model_id, base_url, key):
+    from openai import OpenAI
+    stage('Endpoint')
+    say(f'  {base_url}')
+    try:
+        available = [item.id for item in
+                     OpenAI(base_url=base_url, api_key=key).models.list().data]
+    except Exception as error:
+        return check('the endpoint answered', False, str(error)[:200])
+    if not available:
+        return check('the endpoint serves a model', False,
+                     'no model is loaded, so load one and try again')
+    for name in available:
+        say(f'  serves    {name}')
+    return check(f'{model_id} is one of them', model_id in available,
+                 f'use one of the names above, exactly as printed')
+
+
 # Define function to score many items through an OpenAI compatible endpoint,
 # which is the served fallback and takes the same policy unchanged
 def score_openai(model_id, conversations, effort, base_url, key):
@@ -372,10 +397,28 @@ def score_openai(model_id, conversations, effort, base_url, key):
     from openai import OpenAI
     client = OpenAI(base_url=base_url, api_key=key)
 
+    # llama.cpp and some hosted endpoints reject reasoning_effort outright, so
+    # it is dropped on the first refusal rather than taking the run down. The
+    # model then reasons at its own default, which is recorded in the report.
+    extra = {'reasoning_effort': effort}
+
     def one(messages):
-        reply = client.chat.completions.create(
-            model=model_id, messages=messages, temperature=TEMPERATURE,
-            max_tokens=MAX_TOKENS, reasoning_effort=effort)
+        nonlocal extra
+        try:
+            reply = client.chat.completions.create(
+                model=model_id, messages=messages, temperature=TEMPERATURE,
+                max_tokens=MAX_TOKENS, **extra)
+        except Exception as error:
+            if extra and ('reasoning_effort' in str(error)
+                          or 'unsupported' in str(error).lower()):
+                say('  note      reasoning_effort was rejected, so it is '
+                    'dropped and the default is used')
+                extra = {}
+                reply = client.chat.completions.create(
+                    model=model_id, messages=messages,
+                    temperature=TEMPERATURE, max_tokens=MAX_TOKENS)
+            else:
+                raise
         return reply.choices[0].message.content.strip()
 
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -441,9 +484,9 @@ def report_generation(generator, temperature, tokens):
     passed = check('every prompt got a reply', empty == 0,
                    f'{empty} came back empty')
     say()
-    say(f'  One at a time this rate puts a pass of {FULL_PASS:,} replies at '
-        f'{FULL_PASS / rate / 3600:.1f} hours. vLLM schedules a batch together, '
-        f'so the real figure is a fraction of that and this is an upper bound.')
+    say(f'  One at a time this rate puts a pass of {FULL_PASS:,} replies, '
+        f'being {PANEL} systems, at {FULL_PASS / rate / 3600:.1f} hours. '
+        f'Concurrency reduces it, so this is an upper bound.')
     return passed
 
 
@@ -483,10 +526,11 @@ def report_scoring(scorer, policy, build_item, effort):
         say(f'        {problem}')
 
     say()
-    say(f'  At this rate a full pass of {FULL_PASS:,} replies takes '
-        f'{FULL_PASS / rate / 3600:.1f} hours, before batching. vLLM schedules '
-        f'a batch together, so the served rate on 64 at a time is far above '
-        f'this and the figure is an upper bound.')
+    say(f'  At this rate a full pass of {FULL_PASS:,} replies, being '
+        f'{PANEL} systems, takes {FULL_PASS / rate / 3600:.1f} hours one at a '
+        f'time. Concurrency reduces it: vLLM schedules a batch together, and '
+        f'llama.cpp serves several slots at once, though on unified memory the '
+        f'gain is limited by bandwidth rather than by compute.')
     return correct == len(FIXTURES)
 
 
@@ -556,10 +600,8 @@ def main():
                     passed &= report_scoring(scorer, policy, build_item,
                                              effort.strip())
     else:
-        key = os.environ.get(arguments.key_name, '')
-        stage('Endpoint')
-        say(f'  {arguments.base_url}')
-        if not check(f'{arguments.key_name} is set', bool(key)):
+        key = os.environ.get(arguments.key_name, 'local')
+        if not report_endpoint(model, arguments.base_url, key):
             passed = False
         elif arguments.task == 'generate':
             check('the openai backend serves the judge task only', False,

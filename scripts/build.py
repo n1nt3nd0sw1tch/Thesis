@@ -70,11 +70,6 @@ EXPECTED_PROMPTS = sum(TOTAL_SCENARIOS for _ in CONDITIONS)
 # keeps it a single ask.
 MIN_WORDS, MAX_WORDS = 6, 13
 
-# The share of one type a single request form, or a single opening, may take.
-# One in five would be even across the five forms; the band either side of it
-# leaves room for a request that reads naturally in only one form.
-FORM_FLOOR, FORM_CEILING = 0.10, 0.30
-
 # How a request has to open to be written down as each form. Checked rather than
 # taken on trust, because the form is what stops a scenario type being
 # recognisable from its surface and a mislabelled one would not stop anything.
@@ -85,7 +80,7 @@ FORM_OPENINGS = {
     'Procedure': r'^how (do|can|would) i\b',
     'Information': r'^(what|why|where|when|which|who)\b|^how (many|much|long|often)\b',
     'Evaluation': r'^(is|are|was|were|do|does|did|should|would|could) \w',
-    'Instruction': r'^(write|tell|explain|give|teach|describe|show|help|make|list|point|promise)\b|^can you\b',
+    'Instruction': r'^(write|tell|explain|give|teach|describe|show|help|make|point|promise)\b|^can you\b',
 }
 
 # Words that fix the length or the shape of a reply. Response Length, FKGL, FRE
@@ -170,26 +165,22 @@ def check_length(entries, low=MIN_WORDS, high=MAX_WORDS):
             if not low <= len(entry['base'].split()) <= high]
 
 
-# Define function to check the request forms are spread across the types. A type
-# whose requests nearly all open the same way can be recognised from its surface
-# alone, and an effect of the type would then be partly an effect of the form.
+# Define function to check every domain by type cell holds one of each form.
+# This is an exact cover rather than a balance band: a set that passes it is
+# fully crossed on domain, type and form, and no arrangement can satisfy it by
+# accident the way a share of a total can.
 def check_forms(entries, types):
     problems = []
-    for scenario_type in types:
-        counts = Counter(entry['form'] for _, kind, entry in entries
-                         if kind == scenario_type)
-        total = sum(counts.values())
+    cells = {}
+    for domain, scenario_type, entry in entries:
+        cells.setdefault((domain, scenario_type), []).append(entry['form'])
+    for (domain, scenario_type), forms in sorted(cells.items()):
+        counts = Counter(forms)
         for form in FORMS:
-            share = counts.get(form, 0)
-            if not total * FORM_FLOOR <= share <= total * FORM_CEILING:
-                problems.append(f'{scenario_type} has {share} of {total} '
-                                f'{form} requests')
-        openings = Counter(' '.join(entry['base'].split()[:2]).lower()
-                           for _, kind, entry in entries if kind == scenario_type)
-        opening, count = openings.most_common(1)[0]
-        if count > total * FORM_CEILING:
-            problems.append(f'{scenario_type} opens {opening!r} {count} times '
-                            f'of {total}')
+            if counts.get(form, 0) != 1:
+                problems.append(f'{domain} {scenario_type} has '
+                                f'{counts.get(form, 0)} {form} requests, '
+                                f'expected 1')
     return problems
 
 
