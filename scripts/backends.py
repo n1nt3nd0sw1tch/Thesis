@@ -27,10 +27,21 @@ os.environ.setdefault('HF_HUB_DISABLE_PROGRESS_BARS', '1')
 os.environ.setdefault('TRANSFORMERS_VERBOSITY', 'error')
 
 from settings import GENERATION, JUDGES, MODELS
-from utils import api_key
+from utils import api_key, environment
 
-# Ollama serves an OpenAI-compatible endpoint on this machine
-OLLAMA_URL = os.environ.get('OLLAMA_URL', 'http://localhost:11434')
+# Where Ollama is. Locally that is this machine; set OLLAMA_URL to
+# https://ollama.com and OLLAMA_API_KEY to a key from the console and the same
+# requests reach the hosted models instead, which is how a classifier too large
+# for the machine in front of you gets run without changing the stage that calls
+# it.
+OLLAMA_URL = environment('OLLAMA_URL') or 'http://localhost:11434'
+
+# How long a model stays loaded after a call, and how hard it thinks before
+# answering. Both matter only for the classifier, which is the one model run
+# through Ollama and the one asked the same short question tens of thousands of
+# times.
+OLLAMA_KEEP_ALIVE = environment('OLLAMA_KEEP_ALIVE') or '30m'
+OLLAMA_THINK = environment('OLLAMA_THINK').strip().lower()
 
 # How long to wait for one reply, in seconds. A reasoning model thinks before it
 # answers, so this is generous.
@@ -88,7 +99,9 @@ USAGE_FIELDS = {
     'google': ('usageMetadata', 'promptTokenCount', 'candidatesTokenCount'),
     'deepseek': ('usage', 'prompt_tokens', 'completion_tokens'),
     'mistral': ('usage', 'prompt_tokens', 'completion_tokens'),
-    'qwen': ('usage', 'prompt_tokens', 'completion_tokens'),
+    # Ollama reports the counts at the top level rather than inside a usage
+    # block, so the field it would be read from is empty
+    'ollama': ('', 'prompt_eval_count', 'eval_count'),
 }
 
 # Where each provider takes a conversation, and how it names the pieces. OpenAI
@@ -120,16 +133,10 @@ PROVIDERS = {
         'url': 'https://api.mistral.ai/v1/chat/completions',
         'headers': lambda key: {'Authorization': f'Bearer {key}'},
     },
-    # Qwen serves the same dialect from DashScope's compatible endpoint
-    'qwen': {
-        'url': 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1/'
-               'chat/completions',
-        'headers': lambda key: {'Authorization': f'Bearer {key}'},
-    },
 }
 
 # The providers that speak the OpenAI chat completions dialect at their own host
-CHAT_COMPLETIONS = {'deepseek', 'mistral', 'qwen'}
+CHAT_COMPLETIONS = {'deepseek', 'mistral'}
 
 # ----------------------------------------------------------------------------
 # Backends
@@ -137,23 +144,50 @@ CHAT_COMPLETIONS = {'deepseek', 'mistral', 'qwen'}
 
 # Define function to generate one reply through a local Ollama server
 def generate_ollama(model_id, messages, max_tokens, temperature):
-    payload = {'model': model_id, 'messages': messages, 'stream': False,
-               'options': {'temperature': temperature,
-                           'top_p': GENERATION['top_p'],
-                           'num_predict': max_tokens}}
+    return read_reply('ollama', call_ollama(model_id, messages, max_tokens,
+                                            temperature))
+
+
+# Define function to put one request to Ollama and return the whole body, so that
+# a live pass records what a batch job would have returned and the same
+# read_batch can ingest it
+def call_ollama(model_id, messages, max_tokens, temperature):
+    pace(model_id)
+    payload = build_payload('ollama', model_id, messages, max_tokens, temperature)
+    # a local server needs no credential; the hosted one does
+    headers = {'Content-Type': 'application/json'}
+    key = api_key('ollama')
+    if key:
+        headers['Authorization'] = f'Bearer {key}'
     request = urllib.request.Request(
         f'{OLLAMA_URL}/api/chat', method='POST',
-        data=json.dumps(payload).encode(),
-        headers={'Content-Type': 'application/json'})
-    try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-            body = json.loads(response.read())
-    except urllib.error.URLError as problem:
-        raise SystemExit(f'No Ollama server at {OLLAMA_URL}: {problem.reason}. '
-                         f'Start it with `ollama serve` and fetch the model '
-                         f'with `ollama pull {model_id}`.')
-    # a reasoning model returns its thinking separately from its answer
-    return str(body.get('message', {}).get('content', '')).strip()
+        data=json.dumps(payload).encode(), headers=headers)
+
+    for attempt in range(RETRIES):
+        try:
+            with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+                body = json.loads(response.read())
+            record_usage('ollama', body)
+            return body
+        except urllib.error.HTTPError as problem:
+            # a relayed cloud model reports the cloud's rate limit through the
+            # daemon, so this is transient and worth waiting out rather than a
+            # reason to stop a pass
+            detail = problem.read().decode('utf-8', 'replace')[:200]
+            if problem.code not in RETRY_ON or attempt == RETRIES - 1:
+                raise RuntimeError(f'ollama returned {problem.code}: {detail}')
+        except urllib.error.URLError as problem:
+            # a refused connection means no daemon; anything else is the daemon
+            # or the service it relays to being busy
+            refused = 'refused' in str(problem.reason).lower()
+            if refused:
+                raise SystemExit(
+                    f'No Ollama server at {OLLAMA_URL}: {problem.reason}. Start '
+                    f'it with `ollama serve`, and sign in if the model name ends '
+                    f'-cloud.')
+            if attempt == RETRIES - 1:
+                raise RuntimeError(f'ollama unreachable: {problem.reason}')
+        time.sleep(BACKOFF * (2 ** attempt) * (0.5 + random.random()))
 
 
 # Define function to generate one reply with vLLM, which batches on a GPU
@@ -265,6 +299,23 @@ def build_payload(provider, model_id, messages, max_tokens, temperature):
     system = ' '.join(m['content'] for m in messages if m['role'] == 'system')
     turns = [m for m in messages if m['role'] != 'system']
     off = reasoning_off(model_id)
+    if provider == 'ollama':
+        payload = {'model': model_id, 'messages': messages, 'stream': False,
+                   # the model stays resident, so a long pass does not pay to
+                   # load it again every few seconds
+                   'keep_alive': OLLAMA_KEEP_ALIVE,
+                   'options': {'num_predict': max_tokens}}
+        if takes_sampling(model_id):
+            payload['options']['temperature'] = temperature
+            payload['options']['top_p'] = GENERATION['top_p']
+        # the panel setting decides, and OLLAMA_THINK overrides it for the
+        # classifier, where the machine rather than the design is the constraint
+        if OLLAMA_THINK:
+            payload['think'] = (False if OLLAMA_THINK == 'false' else
+                                True if OLLAMA_THINK == 'true' else OLLAMA_THINK)
+        elif off:
+            payload['think'] = False
+        return payload
     if provider == 'openai':
         # Sampling is sent where the model accepts it, so that as much of the
         # panel as possible is decoded the same way. Where it is refused the
@@ -293,8 +344,6 @@ def build_payload(provider, model_id, messages, max_tokens, temperature):
         if off:
             if provider == 'deepseek':
                 payload['thinking'] = {'type': 'disabled'}
-            elif provider == 'qwen':
-                payload['enable_thinking'] = False
             else:
                 payload['reasoning_effort'] = 'none'
         # DeepSeek ignores these in thinking mode and honours them out of it, so
@@ -320,7 +369,11 @@ def build_payload(provider, model_id, messages, max_tokens, temperature):
                                     'temperature': temperature,
                                     'topP': GENERATION['top_p']}}
     if off:
-        payload['generationConfig']['thinkingConfig'] = {'thinkingBudget': 0}
+        # Gemini has no off. The levels are minimal, low, medium and high, so
+        # the floor is minimal and this arm cannot be held where the other four
+        # are. Set explicitly rather than inherited, so the level is on record
+        # and does not move when the provider changes its default.
+        payload['generationConfig']['thinkingConfig'] = {'thinkingLevel': 'minimal'}
     if system:
         payload['systemInstruction'] = {'parts': [{'text': system}]}
     return payload
@@ -341,6 +394,9 @@ def read_reply(provider, body):
                               and part.get('type') != 'thinking' else ''
                               for part in content)
         return str(content).strip()
+    if provider == 'ollama':
+        # a thinking model returns its reasoning beside its answer, not in it
+        return str((body.get('message') or {}).get('content') or '').strip()
     if provider == 'openai':
         if body.get('output_text'):
             return str(body['output_text']).strip()
@@ -369,7 +425,7 @@ def read_reply(provider, body):
 def record_usage(provider, body):
     global LAST_REASONING, LAST_FINISH
     field, sent, received = USAGE_FIELDS[provider]
-    usage = body.get(field, {}) or {}
+    usage = (body.get(field, {}) or {}) if field else body
     LAST_REASONING = int((usage.get('completion_tokens_details') or {})
                          .get('reasoning_tokens', 0)
                          or (usage.get('output_tokens_details') or {})

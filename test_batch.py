@@ -3,7 +3,7 @@
     python test_batch.py                                  gpt-5.6-luna
     python test_batch.py claude-haiku-4-5-20251001
     python test_batch.py deepseek-v4-flash                live, no batch queue
-    python test_batch.py qwen3.8-2.4t-a95b                live
+    python test_batch.py gemma4:31b-cloud                 live, through Ollama
     python test_batch.py gpt-5.6-luna bod-a3-age09        a chosen prompt
 
 Run it from the repository root. It writes a one line request file, submits it,
@@ -18,7 +18,6 @@ submission, and after any change to the panel or the generation settings.
 import json
 import sys
 import time
-from pathlib import Path
 
 
 sys.path.insert(0, 'scripts')
@@ -78,10 +77,11 @@ def mistral_client(key):
 
 provider = backends.provider_of(MODEL)
 if provider not in ('openai', 'anthropic', 'google', 'deepseek', 'mistral',
-                    'qwen'):
+                    'ollama'):
     raise SystemExit(f'{MODEL} is served by {provider}, which this script does '
                      f'not cover. Use run.py generate --backend api instead.')
-if not utils.api_key(provider):
+# a local Ollama daemon holds its own signed in session, so it needs no key here
+if provider != 'ollama' and not utils.api_key(provider):
     raise SystemExit(f'No api key for {provider}. Put it in .env as '
                      f'{settings.PROVIDER_KEYS[provider]}.')
 
@@ -94,7 +94,7 @@ custom_id = f'{row["prompt_id"]}-r1'
 
 path = settings.BATCHES_DIR / 'test_requests.jsonl'
 path.parent.mkdir(parents=True, exist_ok=True)
-if provider in ('deepseek', 'qwen'):
+if provider in ('deepseek', 'ollama'):
     line = {'custom_id': custom_id, 'body': body}
 elif provider == 'mistral':
     # the model is named on the job, not on the line
@@ -118,7 +118,41 @@ print(f'Payload   {json.dumps(body)}')
 # Submit, wait, and read the one result back
 # ----------------------------------------------------------------------------
 
-if provider in ('deepseek', 'qwen'):
+if provider == 'ollama':
+    # No batch queue, and a different backend from the five that speak http
+    # directly, so the request goes through the pipeline's own Ollama path and
+    # the counts come back in Ollama's own fields rather than a usage block.
+    print(f'\nNo batch queue for this provider, sending live '
+          f'through {backends.OLLAMA_URL}')
+    import urllib.error
+    import urllib.request
+    headers = {'Content-Type': 'application/json'}
+    if utils.api_key('ollama'):
+        headers['Authorization'] = f"Bearer {utils.api_key('ollama')}"
+    call = urllib.request.Request(
+        f'{backends.OLLAMA_URL}/api/chat', method='POST',
+        data=json.dumps(body).encode(), headers=headers)
+    try:
+        with urllib.request.urlopen(call, timeout=600) as response:
+            returned = json.loads(response.read())
+    except urllib.error.HTTPError as problem:
+        raise SystemExit(f'Ollama returned {problem.code}: '
+                         f'{problem.read().decode()[:200]}')
+    except urllib.error.URLError as problem:
+        raise SystemExit(f'No Ollama server at {backends.OLLAMA_URL}: '
+                         f'{problem.reason}')
+    reply = backends.read_reply('ollama', returned)
+    sent = returned.get('prompt_eval_count', 0)
+    received = returned.get('eval_count', 0)
+    thought = str((returned.get('message') or {}).get('thinking') or '')
+    reasoning = len(thought.split())
+    cap_hit = received >= settings.GENERATION['max_tokens']
+    decoded = (f"done_reason {returned.get('done_reason', 'unknown')}"
+               + (f', {reasoning} words of thinking despite the switch'
+                  if thought else ', no thinking returned'))
+    returned = None
+
+elif provider == 'deepseek':
     # Sent live rather than queued. The point of
     # the test is the same: prove the payload is accepted and measure what a
     # reply costs before committing to four thousand of them.
@@ -283,7 +317,6 @@ else:
 # ----------------------------------------------------------------------------
 
 price = backends.panel_entry(MODEL, 'price') or {}
-cost = (sent * price.get('input', 0) + received * price.get('output', 0)) / 1e6
 
 print(f'\nReply\n{reply if returned is None else backends.read_reply(provider, returned)}')
 print(f'\nTokens    {sent} in, {received} out'
@@ -291,8 +324,15 @@ print(f'\nTokens    {sent} in, {received} out'
 print(f'Cap       {settings.GENERATION["max_tokens"]}, '
       f'{"HIT, the reply is cut off" if cap_hit else "not hit"}')
 print(f'Decoded   {decoded}')
-print(f'Cost      ${cost:.5f} standard, ${cost / 2:.5f} batched')
 
 calls = len(prompts) * settings.GENERATION['replicates']
-print(f'\nA full pass of {calls:,} at this rate: '
-      f'${cost * calls:.2f} standard, ${cost * calls / 2:.2f} batched')
+if price:
+    cost = (sent * price.get('input', 0)
+            + received * price.get('output', 0)) / 1e6
+    print(f'Cost      ${cost:.5f} standard, ${cost / 2:.5f} batched')
+    print(f'\nA full pass of {calls:,} at this rate: '
+          f'${cost * calls:.2f} standard, ${cost * calls / 2:.2f} batched')
+else:
+    print('Cost      billed by subscription, not by token')
+    print(f'\nA full pass of {calls:,} at this rate: '
+          f'{calls * (sent + received):,} tokens against the quota')

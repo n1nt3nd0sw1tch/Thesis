@@ -27,20 +27,31 @@ ENV_PATH = ROOT / '.env'
 # once the benchmark is frozen.
 DATA_DIR = ROOT / 'data'
 
-SOURCES_DIR = DATA_DIR / 'sources'
-ORIGINAL_DIR = SOURCES_DIR / 'original'
-DOWNLOADS_PATH = SOURCES_DIR / 'downloads.md'
+# The two released files sit at the top of data/, because they are the benchmark
+# and everything else beside them is either fetched or regenerated. A reader
+# cloning this repository needs these two and nothing more.
+BENCHMARK_PATH = DATA_DIR / 'benchmark.csv'
+PROMPTS_PATH = DATA_DIR / 'prompts.csv'
+
+# Where the corpora are recorded, which is committed, as distinct from the
+# corpora themselves, which are not.
+SOURCES_PATH = DATA_DIR / 'sources.md'
+
+# Everything fetched or rebuilt, kept together and out of the repository. The
+# corpora are other people's, licensed by their authors, and download.py fetches
+# them so that each reader takes them from source rather than from a copy here.
+# drafts.csv is the candidate pool, rebuilt from them on every run, and it
+# reproduces 1,800 source prompts verbatim, which is nearer redistribution than
+# the handful of identifiers the benchmark carries as attribution.
+PROCESS_DIR = DATA_DIR / 'process'
+ORIGINAL_DIR = PROCESS_DIR / 'corpora'
+DRAFTS_PATH = PROCESS_DIR / 'drafts.csv'
 AOA_PATH = ORIGINAL_DIR / 'aoa.csv'
 
 # Batch jobs, one file of requests and one of replies per job, named by the job
 # identifier the provider gives back so that the two pair up and a set of
 # replies can be traced to the exact requests that produced it.
 BATCHES_DIR = DATA_DIR / 'batches'
-
-BENCHMARK_DIR = DATA_DIR / 'benchmark'
-DRAFTS_PATH = BENCHMARK_DIR / 'drafts.csv'
-BENCHMARK_PATH = BENCHMARK_DIR / 'benchmark.csv'
-PROMPTS_PATH = BENCHMARK_DIR / 'prompts.csv'
 
 # Everything a run produces, kept apart from the data because it grows with
 # every run while the benchmark stays fixed. One subfolder per experiment, named
@@ -54,7 +65,7 @@ JUDGEMENTS_DIR = RESULTS_DIR / 'judgements'
 JUDGEMENTS_PATH = RESULTS_DIR / 'judgements.csv'
 DIALOGUES_PATH = PERSISTENCE_DIR / 'dialogues.csv'
 
-DATA_DIRS = [SOURCES_DIR, ORIGINAL_DIR, BENCHMARK_DIR, BATCHES_DIR, RESULTS_DIR,
+DATA_DIRS = [DATA_DIR, PROCESS_DIR, ORIGINAL_DIR, BATCHES_DIR, RESULTS_DIR,
              ADAPTATION_DIR, PERSISTENCE_DIR, JUDGEMENTS_DIR]
 
 # ----------------------------------------------------------------------------
@@ -174,15 +185,22 @@ DATASET_NAMES = sorted({spec['name'] for spec in SOURCES.values()} | {AUTHORED})
 DRAFTS_COLUMNS = ['source_id', 'dataset', 'domain', 'scenario_type', 'category',
                   'order', 'source_prompt', 'request']
 
+# What is written to disk. The request is how the benchmark selects which
+# candidates became scenarios, so it is carried in memory, but it belongs to
+# benchmark.csv rather than here: in the file it would be blank on nine rows in
+# ten and would read as an adaptation that was mostly not attempted.
+DRAFTS_WRITTEN = [column for column in DRAFTS_COLUMNS if column != 'request']
+
 # The benchmark is self-contained, so that the released file needs nothing else
 # read alongside it. Provenance travels with the scenario rather than being
-# asserted in prose: source_id names the record a scenario was adapted from,
-# dataset names where that record came from or Author where the scenario was
-# written for this benchmark, and source_prompt is the wording of that record
-# before it was rewritten, blank where there was none. The two texts sit next to
-# each other at the end, so the adaptation can be read across a single row.
+# asserted in prose: source_id names the record a scenario was adapted from, and
+# dataset names where that record came from, or Author where the scenario was
+# written for this benchmark, which is nearly all of them. The wording of the
+# source record is not carried here, because it would be blank for all but a
+# handful and would imply an adaptation step that mostly did not happen. It
+# remains in drafts.csv for the records that have one.
 BENCHMARK_COLUMNS = ['scenario_id', 'source_id', 'dataset', 'domain',
-                     'scenario_type', 'category', 'source_prompt', 'request']
+                     'scenario_type', 'category', 'request']
 
 # The request is stored beside the prompt so that byte identity across
 # conditions can be checked by reading the file rather than by rebuilding it.

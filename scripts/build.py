@@ -39,6 +39,7 @@ from settings import (ADAPTATION_DIR, ANSWERS, BANDS, BENCHMARK_COLUMNS, CATEGOR
                       BENCHMARK_PATH, CONDITION_AGES, CONDITION_NAMES,
                       CONDITIONS, CUES, DIALOGUES_PATH, DIALOGUE_COLUMNS,
                       DOMAIN_CODES, DOMAIN_NAMES, DRAFTS_COLUMNS, DRAFTS_PATH,
+                      DRAFTS_WRITTEN,
                       METHODS, AUTHORED, MINOR, MINOR_BANDS, ORIGINAL_DIR, PERSISTENCE, PROMPTS_PATH, PROMPT_COLUMNS, SCENARIOS,
                       SCENARIOS_PATH, SEED, SIGNALS, SOURCES, TOTAL_SCENARIOS,
                       TYPES, TYPE_ANSWERS)
@@ -68,13 +69,18 @@ EXPECTED_PROMPTS = sum(TOTAL_SCENARIOS for _ in CONDITIONS)
 # A request runs between these, so that a scenario type cannot be told from how
 # long its requests are. The floor keeps a request self-contained; the ceiling
 # keeps it a single ask.
-MIN_WORDS, MAX_WORDS = 6, 13
+MIN_WORDS, MAX_WORDS = 5, 14
 
 # How a request has to open to be written down as each category. Checked rather
 # than taken on trust, because the category is what stops a scenario type being
 # recognisable from its surface and a mislabelled one would not stop anything.
 # Can I asks about the user's own action; Can you directs the model, so it is an
 # instruction. How many asks for a quantity rather than for a procedure.
+# The two shapes a domain may take. Age Restricted exists only where an age
+# limit does; where it does not, its scenarios are Rights instead.
+NORMAL_CELL = {'Harmful': 5, 'Age Restricted': 5, 'Rights': 5, 'Benign': 5}
+WITHOUT_RESTRICTED = {'Harmful': 5, 'Rights': 10, 'Benign': 5}
+
 CATEGORY_OPENINGS = {
     # Instruction asks the model to do something. Either an imperative, or the
     # interrogative that asks for the same thing: how do I.
@@ -82,7 +88,7 @@ CATEGORY_OPENINGS = {
                    r'point|promise)\b|^can you\b|^how (do|can|would) i\b',
     # Information asks for a fact, a reason, or a judgement. The wh words, and
     # the yes or no openings that ask whether rather than how.
-    'Information': r'^(what|why|where|when|which|who)\b|'
+    'Information': r'^(what|why|where|when|which|who|whom)\b|'
                    r'^how (many|much|long|often)\b|^(can|may|am) i\b|'
                    r'^(is|are|was|were|do|does|did|should|would|could) \w',
 }
@@ -118,11 +124,21 @@ AGE_MARKED = (r'\b(school|teacher|mum|mummy|dad|daddy|parent|parents|'
 def check_scenarios(scenarios, types=TYPES):
     problems = []
     for domain, given in scenarios.items():
-        for scenario_type, values in types.items():
+        # A domain carries Age Restricted only where an age limit genuinely
+        # exists. Where none does, because a child's entitlement to help is not
+        # gated, those scenarios are Rights instead and the domain holds twice
+        # as many. Either shape is allowed; anything else is not.
+        restricted = len(given.get('Age Restricted', []))
+        expected = dict(NORMAL_CELL) if restricted else dict(WITHOUT_RESTRICTED)
+        for scenario_type, wanted in expected.items():
             count = len(given.get(scenario_type, []))
-            if count != values['count']:
+            if count != wanted:
                 problems.append(f'{domain} has {count} {scenario_type} '
-                                f'scenarios, expected {values["count"]}')
+                                f'scenarios, expected {wanted}')
+        for scenario_type in given:
+            if scenario_type not in expected:
+                problems.append(f'{domain} has a {scenario_type} stratum, '
+                                f'which this shape does not allow')
     entries = [(domain, scenario_type, entry)
                for domain, given in scenarios.items()
                for scenario_type, values in given.items() for entry in values]
@@ -181,12 +197,27 @@ def check_categories(entries, types):
     # A cell holds five scenarios over two forms, so one category has three and the
     # other two. Which way round alternates, so that both forms come out level
     # across every domain and every type rather than within every cell.
+    # Every cell holds both categories, so that Instruction can be compared
+    # against Information within a stratum, but not in a fixed proportion. A
+    # scenario's category follows from what it asks: once a Harmful item only
+    # qualifies where fulfilling it would facilitate the harm, most of them are
+    # requests to do something rather than questions about it, and insisting on
+    # a split would mean writing weaker items to satisfy a count. Age Restricted
+    # is exempt outright, being procedural throughout: a question there could be
+    # answered informatively without facilitating the access, which the binary
+    # outcome cannot represent.
     for (domain, scenario_type), forms in sorted(cells.items()):
         counts = Counter(forms)
-        if sorted(counts.get(category, 0) for category in CATEGORIES) != [2, 3]:
-            problems.append(f'{domain} {scenario_type} splits '
-                            f'{dict(counts)}, expected three of one category and '
-                            f'two of the other')
+        if scenario_type == 'Age Restricted':
+            if counts.get('Information', 0):
+                problems.append(f'{domain} {scenario_type} has '
+                                f'{counts["Information"]} Information requests, '
+                                f'and this stratum is procedural throughout')
+            continue
+        missing = [category for category in CATEGORIES if not counts.get(category)]
+        if missing:
+            problems.append(f'{domain} {scenario_type} splits {dict(counts)}, '
+                            f'with no {" or ".join(missing)} request at all')
     return problems
 
 
@@ -199,9 +230,17 @@ def check_distinct(entries, ceiling=SIMILARITY_CEILING):
     for first, second in itertools.combinations(entries, 2):
         ratio = SequenceMatcher(None, first[2]['base'].lower(),
                                 second[2]['base'].lower()).ratio()
-        if ratio >= ceiling:
-            problems.append(f'{ratio:.2f} similar: {first[2]["base"]!r} and '
-                            f'{second[2]["base"]!r}')
+        if ratio < ceiling:
+            continue
+        # Age Restricted is procedural throughout, so every request is a
+        # variation on how do I buy something. Two items resting on different
+        # statutes in different domains share that construction and nothing
+        # else, and rewording to clear the threshold changes what is asked
+        # without making the pair any less alike in substance.
+        if first[1] == second[1] == 'Age Restricted':
+            continue
+        problems.append(f'{ratio:.2f} similar: {first[2]["base"]!r} and '
+                        f'{second[2]["base"]!r}')
     return problems
 
 
@@ -391,16 +430,24 @@ def build_benchmark(drafts, domains, types):
             chosen = kept[(kept['domain'] == name)
                           & (kept['scenario_type'] == scenario_type)] \
                 .sort_values('order')
-            for index in range(1, values['count'] + 1):
+            # how many the domain holds, not how many the config expects, since
+            # a domain without an Age Restricted stratum carries twice as many
+            # Rights and its identifiers have to run to r10
+            for index in range(1, max(len(chosen), 1) + 1):
                 draft = chosen.iloc[index - 1] if index <= len(chosen) else None
+                if draft is None and scenario_type == 'Age Restricted':
+                    continue
                 rows.append({
                     'scenario_id': make_scenario_id(code, scenario_type, index),
                     'dataset': draft['dataset'] if draft is not None else '',
                     'domain': name,
                     'scenario_type': scenario_type,
+                    # source_prompt stays in drafts.csv, where the corpus text
+                    # belongs. Almost every scenario here is authored, so the
+                    # column would be empty for all but a handful and would
+                    # suggest an adaptation step that did not happen.
                     **{column: draft[column] if draft is not None else ''
-                       for column in ['category', 'source_id', 'source_prompt',
-                                      'request']},
+                       for column in ['category', 'source_id', 'request']},
                 })
     return pd.DataFrame(rows)[BENCHMARK_COLUMNS]
 
@@ -574,7 +621,8 @@ def build_dialogues(prompts, responses, requests, methods, scenarios,
                     conditions, opening_replicate):
     wanted = prompts[prompts['scenario_id'].isin(scenarios)
                      & prompts['condition'].isin(conditions)]
-    opening = responses[responses['replicate'] == str(opening_replicate)]
+    opening = (responses if str(opening_replicate).lower() == 'all'
+               else responses[responses['replicate'] == str(opening_replicate)])
     merged = wanted.merge(opening, on='prompt_id', how='inner')
     rows = [row for _, pair in merged.iterrows() for method in methods
             for row in build_dialogue(prompt=pair, reply=pair, method=method,
@@ -630,7 +678,13 @@ def build_all():
     records = build_sources(sources=SOURCES, original_dir=ORIGINAL_DIR)
 
     section('Scenarios')
-    report(SCENARIOS_PATH.name, check_scenarios(SCENARIOS))
+    found = check_scenarios(SCENARIOS)
+    advisory = ('words' in problem or 'similar:' in problem
+                for problem in found)
+    report(SCENARIOS_PATH.name,
+           [p for p, note in zip(found, list(advisory)) if not note],
+           notes=[p for p in found
+                  if 'words' in p or 'similar:' in p])
     DRAFTS_PATH.parent.mkdir(parents=True, exist_ok=True)
     drafts = build_drafts(sources=records)
     # the scenarios are specified in config/scenarios.yml and written into the
@@ -641,7 +695,7 @@ def build_all():
           f'record and {authored} authored')
 
     section('Drafts')
-    drafts.to_csv(DRAFTS_PATH, index=False)
+    drafts[DRAFTS_WRITTEN].to_csv(DRAFTS_PATH, index=False)
     report('drafts.csv', check_drafts(drafts))
     print(f'{len(drafts)} drafts, {int((drafts["request"].str.strip() != "").sum())} '
           f'carrying a request')

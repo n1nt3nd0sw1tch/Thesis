@@ -6,7 +6,6 @@ Run it from the repository root. It changes nothing.
 """
 import json
 import sys
-from pathlib import Path
 
 sys.path.insert(0, 'scripts')
 import backends
@@ -27,10 +26,10 @@ def check(label, passed, detail=''):
 print(f'Preflight for {MODEL}\n')
 
 print('Scripts')
-for name, attr in [('run', 'write_batch'), ('run', 'read_batch'),
-                   ('run', 'set_aside_replies'), ('run', 'name_after_job'),
-                   ('backends', 'spent'), ('settings', 'BATCHES_DIR')]:
-    check(f'{name}.{attr}', hasattr(globals()[name], attr))
+for module, attr in [(run, 'write_batch'), (run, 'read_batch'),
+                     (run, 'set_aside_replies'), (run, 'name_after_job'),
+                     (backends, 'spent'), (settings, 'BATCHES_DIR')]:
+    check(f'{module.__name__}.{attr}', hasattr(module, attr))
 
 print('\nSampling')
 provider = backends.provider_of(MODEL)
@@ -49,8 +48,9 @@ if not takes:
 import json as _json
 sent = _json.dumps(probe)
 switched = ('"effort": "none"' in sent or '"type": "disabled"' in sent
-            or '"thinkingBudget": 0' in sent or '"reasoning_effort": "none"' in sent
-            or '"enable_thinking": false' in sent)
+            or '"thinkingLevel": "minimal"' in sent
+            or '"reasoning_effort": "none"' in sent
+            or '"think": false' in sent)
 wanted = str(settings.GENERATION.get('reasoning', 'provider')).lower() == 'none'
 if provider == 'anthropic':
     check('reasoning off', not switched,
@@ -61,7 +61,8 @@ else:
           'switched off in the payload' if switched else 'nothing sent')
 # each provider names the cap differently, and Google nests it
 cap = (probe.get('max_output_tokens') or probe.get('max_tokens')
-       or (probe.get('generationConfig') or {}).get('maxOutputTokens'))
+       or (probe.get('generationConfig') or {}).get('maxOutputTokens')
+       or (probe.get('options') or {}).get('num_predict'))
 check(f"cap is {settings.GENERATION['max_tokens']}",
       cap == settings.GENERATION['max_tokens'])
 

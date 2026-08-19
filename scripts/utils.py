@@ -141,10 +141,19 @@ def shape_of(frame):
     return f'{len(frame)} rows, {frame.shape[1]} columns'
 
 
-# Define function to report validation problems and stop when any are found
-def report(name, problems):
+# Define function to report what a check found. A problem stops the build,
+# because it means the file cannot be read as the design describes it: a
+# mislabelled category, an age named in the request rather than the opener, a
+# cell of the wrong shape. A note does not, because it is a matter of style or a
+# proxy that fires imprecisely: how long a request runs, or how much wording it
+# shares with another. Neither of those changes what a reply is compared with,
+# so neither is worth refusing to build over. They are printed, and left.
+def report(name, problems, notes=()):
+    for note in notes:
+        print(f'  {name}: {note}')
     if not problems:
-        print(f'Validated {name}')
+        print(f'Validated {name}'
+              + (f', {len(notes)} to look at' if notes else ''))
         return
     for problem in problems:
         print(f'  {name}: {problem}')

@@ -20,6 +20,7 @@ without regenerating anything.
                 anthropic   stop_reason max_tokens
                 google      finishReason MAX_TOKENS
                 deepseek    finish_reason length
+                ollama      done_reason length
 
 An empty reply is then explained rather than merely counted. It is either a
 blocked prompt, which produced nothing, or a truncated one where the model spent
@@ -64,7 +65,8 @@ def key_of(record):
 # Define function to say why generation stopped, in whichever field the provider
 # put it
 def finishes_of(body):
-    reasons = [str(body.get('stop_reason') or ''), str(body.get('status') or '')]
+    reasons = [str(body.get('stop_reason') or ''), str(body.get('status') or ''),
+               str(body.get('done_reason') or '')]
     for choice in (body.get('choices') or body.get('candidates') or []):
         reasons.append(str(choice.get('finish_reason')
                            or choice.get('finishReason') or ''))

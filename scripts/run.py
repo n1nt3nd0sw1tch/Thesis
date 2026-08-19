@@ -1,10 +1,10 @@
 """Puts the benchmark to a model, and checks the panel before doing so.
 
     python scripts/run.py check
-    python scripts/run.py check --model qwen3:8b --prompt-id sub-h1-age09
+    python scripts/run.py check --model gemma3:12b --prompt-id sub-h1-age09
 
-    ollama pull qwen3:8b
-    python scripts/run.py generate --model qwen3:8b --backend ollama
+    ollama pull gemma3:12b
+    python scripts/run.py generate --model gemma3:12b --backend ollama
 
     python scripts/run.py generate --backend mlx --limit 60 \
         --model mlx-community/Qwen2.5-7B-Instruct-4bit
@@ -34,7 +34,7 @@ import pandas as pd
 import requests
 import backends
 from backends import (BATCH_SIZE, BATCHED, BACKENDS, USAGE, ask, build_payload,
-                      call_api,
+                      call_api, call_ollama,
                       generate, generate_many, provider_of, read_reply,
                       record_usage, spent)
 from evaluate import (JUDGE_TEMPERATURE, JUDGE_TOKENS, OLLAMA_JUDGE, build_item,
@@ -191,9 +191,13 @@ def generate_part(model, part, parts, replicates=None, max_tokens=None,
     prompts = read_table(PROMPTS_PATH)
     by_id = dict(zip(prompts['prompt_id'], prompts['prompt']))
 
+    # Ollama is a different backend from the five that speak http directly, so
+    # the call is chosen by provider rather than assumed
+    call = call_ollama if provider_of(model) == 'ollama' else call_api
+
     def produce(item):
-        body = call_api(model, [{'role': 'user', 'content': by_id[item['prompt_id']]}],
-                        max_tokens, item['temperature'])
+        body = call(model, [{'role': 'user', 'content': by_id[item['prompt_id']]}],
+                    max_tokens, item['temperature'])
         append_line(path, {'custom_id': f'{item["prompt_id"]}-r{item["replicate"]}',
                            'response': {'status_code': 200, 'body': body}})
         return {}

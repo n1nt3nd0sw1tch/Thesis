@@ -14,7 +14,7 @@ from datetime import date
 import pandas as pd
 import requests
 from datasets import load_dataset
-from settings import (DATASETS, DOWNLOADS_PATH, ORIGINAL_DIR,
+from settings import (DATASETS, SOURCES_PATH, ORIGINAL_DIR,
                       SAFECHILD_COMMIT)
 
 # ----------------------------------------------------------------------------
@@ -148,4 +148,4 @@ if __name__ == '__main__':
     download_all(datasets=resolved, original_dir=ORIGINAL_DIR)
 
     downloads = summarise_downloads(datasets=resolved, original_dir=ORIGINAL_DIR)
-    write_documentation(summary=downloads, doc_path=DOWNLOADS_PATH)
+    write_documentation(summary=downloads, doc_path=SOURCES_PATH)

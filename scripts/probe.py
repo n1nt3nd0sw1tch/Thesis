@@ -439,7 +439,7 @@ def extract(text):
 # Define function to read the prompts the smoke test uses. The benchmark is
 # preferred, so the test exercises what a real pass will send, and the built in
 # copies are used only when the file is not on the node.
-def load_prompts(wanted=SMOKE_PROMPT_IDS, path=Path('data/benchmark/prompts.csv')):
+def load_prompts(wanted=SMOKE_PROMPT_IDS, path=Path('data/prompts.csv')):
     if not path.exists():
         return FALLBACK_PROMPTS, 'built in copies, prompts.csv not found'
     import csv

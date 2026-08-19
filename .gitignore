@@ -7,7 +7,7 @@
 secrets/
 
 # Python
-**pycache**/
+__pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
@@ -27,33 +27,26 @@ ENV/
 .vscode/
 .idea/
 
-# Downloaded datasets
-data/original/
-data/sources/original/
-examples/
+# Fetched or rebuilt
+# The corpora are other people's, licensed by their authors, and download.py
+# fetches them so that each reader takes them from source rather than from a
+# copy here. drafts.csv is rebuilt from them on every run and reproduces
+# eighteen hundred source prompts verbatim. benchmark.csv, prompts.csv and
+# sources.md sit outside this directory and are committed, because they are the
+# benchmark and the record of where it came from.
 archive/
+archive temp/
+data/process/
 
-
-# Model outputs
-results/responses/
-results/raw/
+# Collected replies
+# Raw provider files and the replies read out of them. Large, and regenerated
+# by rerunning the pass rather than by rebuilding, so losing them costs money
+# rather than a command. Keep a copy somewhere that is not this repository.
+data/batches/
 results/**/*.jsonl
-results/**/*_responses.csv
-results/**/*_traces.csv
 
-# Jobs and logs
-jobs/*.o[0-9]*
-jobs/*.e[0-9]*
-jobs/*.po[0-9]*
-jobs/*.pe[0-9]*
+# Logs
 *.log
-
-# Models
-models/
-*.safetensors
-*.gguf
-*.bin
-*.pt
 
 # LaTeX
 *.aux

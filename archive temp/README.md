@@ -15,8 +15,8 @@ scripts/
   settings.py      what the design states, and where everything lives
   utils.py         identifiers, files, validation, and the loop the stages share
   backends.py      one reply, through whichever runtime is available
-  download.py      1  the corpora        -> data/sources/
-  build.py         2  the benchmark      -> data/benchmark/
+  download.py      1  the corpora        -> data/process/corpora/
+  build.py         2  the benchmark      -> data/
   run.py           3  the replies        -> results/adaptation/
   evaluate.py      4  the judgements     -> results/judgements.csv
 
@@ -42,7 +42,7 @@ or `results/`, and reports what it did.
 
 | Stage | Command | Writes |
 |---|---|---|
-| 1. Corpora | `python scripts/download.py` | `data/sources/` |
+| 1. Corpora | `python scripts/download.py` | `data/process/corpora/` |
 | 2. Benchmark | `python scripts/build.py` | `drafts.csv`, `benchmark.csv`, `prompts.csv`, `scores.csv` |
 | 3. Replies | `python scripts/run.py generate --model <id> --backend <runtime>` | `results/adaptation/<model>.jsonl` |
 | 4. Judgements | `python scripts/evaluate.py --backend <runtime>` | `results/judgements.csv` |
@@ -107,5 +107,5 @@ running it scores the replies.
 ## Licences
 
 The code is under the licence in `LICENSE`. The source corpora keep their own,
-recorded with a checksum per file in `data/sources/downloads.md`. They are
+recorded with a checksum per file in `data/sources.md`. They are
 downloaded rather than redistributed here.
