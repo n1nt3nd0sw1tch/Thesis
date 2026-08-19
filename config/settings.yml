@@ -659,7 +659,7 @@ generation:
   # measures would read a severed clause as the whole reply. A pilot at 512 cut
   # nine per cent of replies, and cut the longest hardest, which biases the
   # comparison because replies to adults run longer.
-  max_tokens: 1024
+  max_tokens: 4096
   replicates: 3
 
 # Environment variable each provider reads its key from. Set them in .env,
@@ -687,7 +687,6 @@ keys:
   google: GOOGLE_API_KEY
   deepseek: DEEPSEEK_API_KEY
   mistral: MISTRAL_API_KEY
-  # only needed for the hosted classifier, not for a local server
   ollama: OLLAMA_API_KEY
 
 models:

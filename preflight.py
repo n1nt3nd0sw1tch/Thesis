@@ -100,6 +100,6 @@ wanted = len(prompts) * settings.GENERATION['replicates']
 outstanding = wanted - len(collected)
 print(f'  {outstanding:,} of {wanted:,} outstanding')
 if outstanding == 0:
-    print('  Nothing would be written. Set FRESH = True to rerun from scratch.')
+    print('  Nothing would be written. Set FRESH = False to rerun from scratch.')
 
 print(f"\n{'Ready to submit' if ok else 'NOT ready, fix the FAIL lines above'}")
