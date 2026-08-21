@@ -61,12 +61,13 @@ RESULTS_DIR = ROOT / 'results'
 ADAPTATION_DIR = RESULTS_DIR / 'adaptation'
 PERSISTENCE_DIR = RESULTS_DIR / 'persistence'
 JUDGEMENTS_DIR = RESULTS_DIR / 'judgements'
+LANGUAGE_DIR = RESULTS_DIR / 'language'
 
 JUDGEMENTS_PATH = RESULTS_DIR / 'judgements.csv'
 DIALOGUES_PATH = PERSISTENCE_DIR / 'dialogues.csv'
 
 DATA_DIRS = [DATA_DIR, PROCESS_DIR, ORIGINAL_DIR, BATCHES_DIR, RESULTS_DIR,
-             ADAPTATION_DIR, PERSISTENCE_DIR, JUDGEMENTS_DIR]
+             ADAPTATION_DIR, PERSISTENCE_DIR, JUDGEMENTS_DIR, LANGUAGE_DIR]
 
 # ----------------------------------------------------------------------------
 # Read from config/
@@ -211,15 +212,35 @@ PROMPT_COLUMNS = ['prompt_id', 'scenario_id', 'condition', 'age', 'band',
 # One record per reply. The identifying fields come first so that scanning the
 # file shows what each line is without reading the reply itself, and the reply
 # comes last because it is the only field of unpredictable length.
-RESPONSE_COLUMNS = ['prompt_id', 'model', 'replicate', 'backend', 'temperature',
-                    'error', 'blocked', 'truncated', 'response']
+# A reply, identified by the model that gave it, the prompt it answered, and
+# which of the repeated draws it was. How it was fetched and at what temperature
+# are properties of the pass rather than of the reply: they are the same on every
+# row, they are recorded in config/settings.yml, and repeating them here would
+# put a configuration into the data.
+RESPONSE_COLUMNS = ['model', 'prompt_id', 'replicate', 'error', 'blocked',
+                    'truncated', 'response']
 
 # One row per scored reply: what the model did with the request, the five safety
 # measures, and the language measures computed from the text.
-JUDGEMENT_COLUMNS = (['prompt_id', 'model', 'replicate', 'judge', 'answer']
+JUDGEMENT_COLUMNS = (['model', 'prompt_id', 'replicate', 'judge',
+                      'expected_answer', 'answer']
                      + [measure_column(name) for name in SAFETY]
-                     + [measure_column(name) for name in LANGUAGE]
-                     + ['expected_answer', 'deviation'])
+                     + ['deviation'])
+
+# A reply the provider withheld was never the model's to give, so it is neither
+# a refusal nor a compliance. It is recorded under its own label, assigned from
+# the raw record rather than by the classifier, and it is not sent to the
+# classifier at all: asking a model to describe an absent reply invites it to
+# invent one.
+BLOCKED = 'Blocked'
+
+# The language measures are computed from the reply text and need no model, so
+# they are written separately from what a classifier decided. Changing how
+# readability is measured, or which replies are too short to measure, then costs
+# a second of arithmetic rather than another pass of the judge.
+LANGUAGE_COLUMNS = (['model', 'prompt_id', 'replicate']
+                    + [measure_column(name) for name in LANGUAGE]
+                    + ['max_aoa', 'difficult', 'covered'])
 
 # One row per turn of a replayed dialogue. The first assistant turn is a reply
 # already collected single turn, so only the later turns are generated. The

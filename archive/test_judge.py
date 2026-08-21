@@ -23,7 +23,7 @@ import os
 import sys
 
 sys.path.insert(0, 'scripts')
-import evaluate
+import scripts.evaluate as evaluate
 import settings
 import utils
 

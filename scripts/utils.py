@@ -271,7 +271,7 @@ def announce(path, wanted, pending, limit=0):
 # order they came back rather than the order asked. Nothing reads that order:
 # every record carries its own prompt and replicate, and resume matches on those.
 def collect(pending, produce, path, label='', meter=None, produce_batch=None,
-            batch_size=1, workers=1):
+            batch_size=1, workers=1, columns=()):
     started, spoke, failures = time.time(), time.time(), 0
     size = batch_size if produce_batch else 1
     index = 0
@@ -309,7 +309,13 @@ def collect(pending, produce, path, label='', meter=None, produce_batch=None,
                 failures += 1 if error else 0
 
             for item, result, error in zip(group, results, errors):
-                append_line(path, {**item, **result, 'error': error})
+                # An item carries whatever the call needed, which is not the
+                # same as what the reply is. Only the columns the file declares
+                # are written, so a parameter used to fetch a reply does not
+                # become a field of it.
+                row = {**item, **result, 'error': error}
+                append_line(path, {name: row[name] for name in columns
+                                   if name in row} if columns else row)
             index += len(group)
 
             if time.time() - spoke >= REPORT_EVERY or index == len(pending):

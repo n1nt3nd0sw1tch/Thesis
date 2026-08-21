@@ -40,7 +40,7 @@ from backends import (BATCH_SIZE, BATCHED, BACKENDS, USAGE, ask, build_payload,
 from evaluate import (JUDGE_TEMPERATURE, JUDGE_TOKENS, OLLAMA_JUDGE, build_item,
                       build_policy, compare, describe, read)
 from flags import flags_of
-from settings import (ADAPTATION_DIR, BENCHMARK_PATH, GENERATION, JUDGE,
+from settings import (ADAPTATION_DIR, RESPONSE_COLUMNS, BENCHMARK_PATH, GENERATION, JUDGE,
                       BATCHES_DIR, MODELS, PROMPTS_PATH, PROVIDER_KEYS)
 from utils import (WORKERS, announce, api_key, append_line, collect,
                    make_directories, model_slug, outstanding, read_all,
@@ -94,9 +94,13 @@ def run_generation(arguments):
         raise SystemExit('Nothing outstanding')
 
     def produce(item):
+        # the two flags are set here even when nothing happened, so that every
+        # row has them and a later pass over the raw files has something to
+        # correct rather than a column that is missing on half the file
         return {'response': ask(item['backend'], item['model'],
                                 by_id[item['prompt_id']], arguments.max_tokens,
-                                item['temperature'])}
+                                item['temperature']),
+                'blocked': '', 'truncated': False}
 
     def produce_batch(group):
         replies = generate_many(
@@ -116,7 +120,7 @@ def run_generation(arguments):
     elif arguments.workers > 1:
         print(f'{arguments.workers} calls in flight at once')
     failures = collect(pending=pending, produce=produce, path=path,
-                       label=arguments.model,
+                       label=arguments.model, columns=RESPONSE_COLUMNS,
                        meter=meter if arguments.backend == 'api' else None,
                        produce_batch=produce_batch if batched else None,
                        batch_size=arguments.batch_size,

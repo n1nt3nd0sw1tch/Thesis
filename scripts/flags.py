@@ -78,6 +78,12 @@ def finishes_of(body):
 # there is no field to read and the message is what identifies it.
 FILTERED = ('content filtering policy', 'content_filter', 'blocked by')
 
+# Stop reasons that mean the provider withheld the reply rather than the model
+# finishing it. Google reports these on the candidate, where a reply that was
+# blocked after generation has a stop reason and no content at all.
+BLOCKING = {'content_filter', 'prohibited_content', 'safety', 'blocklist',
+            'spii', 'image_safety', 'recitation'}
+
 
 # Define function to read the two flags off one raw record. The body is enough
 # for most providers, but a reply the provider filtered may have no body at all,
@@ -87,7 +93,8 @@ def flags_of(body, record=None):
     finishes = finishes_of(body)
     blocked = ((body.get('promptFeedback') or {}).get('blockReason')
                or (body.get('prompt_feedback') or {}).get('block_reason')
-               or ('CONTENT_FILTER' if 'content_filter' in finishes else ''))
+               or next((reason.upper() for reason in finishes
+                        if reason in BLOCKING), ''))
     if not blocked and record:
         said = str((record.get('result') or {}).get('error')
                    or record.get('error') or '').lower()
@@ -107,11 +114,20 @@ def flags_of(body, record=None):
 def raw_flags(model=''):
     found = {}
     for path in sorted(BATCHES_DIR.glob('*output.jsonl')):
-        for line in path.read_text().splitlines():
-            if not line.strip():
-                continue
-            record = json.loads(line)
-            if model and model_of(record) != model:
+        records = [json.loads(line) for line in path.read_text().splitlines()
+                   if line.strip()]
+        # A record the provider refused carries no model, because there is no
+        # reply for one to be reported on, and a batch file is named after the
+        # job rather than the model. So the file itself is the evidence: it
+        # holds one pass, and whichever model its other records name is the one
+        # the refused record belongs to. Filtering on the model alone would drop
+        # exactly the records this function exists to find.
+        named = [model_of(record) for record in records if model_of(record)]
+        belongs = max(set(named), key=named.count) if named else ''
+        if model and belongs and belongs != model:
+            continue
+        for record in records:
+            if model and not belongs and model_of(record) != model:
                 continue
             found[key_of(record)] = flags_of(body_of(record), record)
     return found
